@@ -28,6 +28,14 @@ Four jobs, kept apart on purpose:
                          arXiv:2306.05685, the MT-Bench swap-and-tie
                          protocol this module's position swap follows).
 
+Judge calls cost real money and that spend was previously discarded after
+being read off grok's own headless-stdout JSON. `_default_grok` now reports
+`total_cost_usd` (as `cost_usd`, None when unknown -- never 0.0) on every
+call it makes, success or failure; `grade_matrix` stamps the per-pair total
+onto each Grade as `judge_cost_usd`; and the module-level `judge_cost()`
+sums that across a matrix, also None rather than 0.0 when the total isn't
+fully known.
+
     python3 -m unittest discover interstellar/tests
 """
 from __future__ import annotations
@@ -359,12 +367,19 @@ _JUDGE_HARNESS_VERSION = make_harness_version(
 )
 
 
-def _diagnostic(error, *, exit_code=None, stderr="", structured_output_state=None):
+def _diagnostic(error, *, exit_code=None, stderr="", structured_output_state=None,
+                 cost_usd=None):
     """One consistently-shaped failure dict -- every field the fix-round-3
     review asked to be recorded, on every failure path: the error message
     verbatim, the process exit code, a truncated stderr tail, and whether
     `structuredOutput` was absent, present-but-null, or present-but-wrong-type.
     `winner: None` keeps `_call_winner` treating this as unparseable.
+
+    `cost_usd` defaults to None (unknown), not 0.0: a call that never got far
+    enough to produce parseable stdout JSON has a genuinely unknown cost, and
+    a call that failed *after* producing stdout still may have cost money --
+    see `_default_grok`'s callers, which pass the real figure through here
+    once `total_cost_usd` has actually been read off the child's output.
     """
     return {
         "winner": None,
@@ -372,7 +387,21 @@ def _diagnostic(error, *, exit_code=None, stderr="", structured_output_state=Non
         "exit_code": exit_code,
         "stderr_tail": (stderr or "")[-500:],
         "structured_output_state": structured_output_state,
+        "cost_usd": cost_usd,
     }
+
+
+def _extract_cost(out):
+    """`total_cost_usd` off grok's own headless-stdout JSON, or None when the
+    field is absent or not a number -- never coerced to 0.0 (a missing
+    measurement and a measurement of zero are different claims; see the
+    module's `judge_cost`). `bool` is excluded despite being an `int`
+    subclass in Python -- `total_cost_usd: true` is not a dollar figure.
+    """
+    cost = out.get("total_cost_usd")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    return float(cost)
 
 
 def _default_grok(prompt_text, schema, *, model=None, timeout=600):
@@ -407,6 +436,12 @@ def _default_grok(prompt_text, schema, *, model=None, timeout=600):
     `structuredOutput` itself is absent). `judge_pair`'s `_call_winner` still
     degrades either shape to an unparseable verdict when `winner` isn't a
     valid choice.
+
+    Every returned dict also carries `cost_usd`: grok's own `total_cost_usd`
+    off this child's stdout JSON, or None when that stdout was never
+    obtained/parsed or didn't carry a numeric figure (see `_extract_cost`).
+    This call spends real money whether or not it produces a usable verdict,
+    so cost is attached on the failure paths too, not only on success.
     """
     with tempfile.TemporaryDirectory(prefix="interstellar-judge-") as tmp:
         try:
@@ -441,6 +476,13 @@ def _default_grok(prompt_text, schema, *, model=None, timeout=600):
             return _diagnostic("stdout json is not an object",
                                 exit_code=proc.returncode, stderr=proc.stderr)
 
+        # Read once here: `total_cost_usd` is grok's own accounting of what
+        # this child process spent, and it's meaningful on every return path
+        # below -- including the failure ones. A judge call that errored out
+        # after the model ran still cost money; only the returns *above* this
+        # point (no stdout JSON to read it from at all) report cost_usd=None.
+        cost = _extract_cost(out)
+
         if out.get("structuredOutputError"):
             return _diagnostic(
                 f"structuredOutputError: {out['structuredOutputError']}",
@@ -449,6 +491,7 @@ def _default_grok(prompt_text, schema, *, model=None, timeout=600):
                     "null" if "structuredOutput" in out and out["structuredOutput"] is None
                     else "absent"
                 ),
+                cost_usd=cost,
             )
 
         structured = out.get("structuredOutput")
@@ -456,10 +499,12 @@ def _default_grok(prompt_text, schema, *, model=None, timeout=600):
             if isinstance(structured, dict):
                 result = dict(structured)
                 result["_source"] = "structuredOutput"
+                result["cost_usd"] = cost
                 return result
             return _diagnostic("structuredOutput present but not an object",
                                 exit_code=proc.returncode, stderr=proc.stderr,
-                                structured_output_state="present_non_dict")
+                                structured_output_state="present_non_dict",
+                                cost_usd=cost)
 
         # structuredOutput absent -- fall back to the text buffer. Documented
         # by the harness itself as untrustworthy for this purpose; used only
@@ -471,13 +516,14 @@ def _default_grok(prompt_text, schema, *, model=None, timeout=600):
         except json.JSONDecodeError:
             return _diagnostic("no structuredOutput and text is not JSON",
                                 exit_code=proc.returncode, stderr=proc.stderr,
-                                structured_output_state=state)
+                                structured_output_state=state, cost_usd=cost)
         if not isinstance(parsed, dict):
             return _diagnostic("no structuredOutput and text is not a JSON object",
                                 exit_code=proc.returncode, stderr=proc.stderr,
-                                structured_output_state=state)
+                                structured_output_state=state, cost_usd=cost)
         parsed = dict(parsed)
         parsed["_source"] = "text_fallback"
+        parsed["cost_usd"] = cost
         return parsed
 
 
@@ -519,22 +565,40 @@ def _diagnose_failure(raw):
     return f"winner field was {raw.get('winner')!r}, not one of '1'/'2'/'tie'"
 
 
+def _sum_costs(costs):
+    """Sum a list of per-call `cost_usd` values (each a float, or None for
+    "this call's cost is unknown"). Any single unknown call poisons the sum
+    to None rather than silently treating that call as free -- summing only
+    the known ones would produce a number that looks precise but is
+    provably an undercount, which is worse than admitting the total isn't
+    known (see `judge_cost`, which relies on this same rule at matrix scale).
+    """
+    if any(c is None for c in costs):
+        return None
+    return sum(costs)
+
+
 def _call_grok_with_retry(grok, prompt_text, schema, *, model,
                            max_attempts=_JUDGE_CALL_MAX_ATTEMPTS):
     """Call `grok` up to `max_attempts` times, stopping at the first attempt
     that produces a valid winner. Judge calls are cheap relative to a replay
     run, and a transient failure (network blip, an occasional validation
     miss) shouldn't cost a sample point when one retry likely recovers it.
-    Returns `(raw, attempts_made)` -- `attempts_made > 1` means a retry
-    happened, and that is recorded alongside the raw result, not silently
-    absorbed.
+    Returns `(raw, attempts_made, cost_usd)` -- `attempts_made > 1` means a
+    retry happened, and that is recorded alongside the raw result, not
+    silently absorbed. `cost_usd` sums every attempt actually made, not just
+    the last one: a retried call is a second real charge against the same
+    pair, not a do-over that erases the first one's cost. It's None (via
+    `_sum_costs`) if any attempt's own cost couldn't be determined.
     """
     raw = None
+    costs = []
     for attempt in range(1, max_attempts + 1):
         raw = grok(prompt_text, schema, model=model)
+        costs.append(raw.get("cost_usd") if isinstance(raw, dict) else None)
         if _call_winner(raw) is not None:
-            return raw, attempt
-    return raw, max_attempts
+            return raw, attempt, _sum_costs(costs)
+    return raw, max_attempts, _sum_costs(costs)
 
 
 def _judge_pair_impl(prompt, response_a, response_b, *, grok=None, model=None):
@@ -548,12 +612,20 @@ def _judge_pair_impl(prompt, response_a, response_b, *, grok=None, model=None):
     with a valid `winner` -- a genuine disagreement between two calls that
     both parsed is a legitimate tie, not this. `failure_detail` is a
     human-readable string when `unparseable` is True, else None.
+
+    `verdict_dict["raw"][-1]["cost_usd"]` carries this pair's total judge
+    spend -- both position orders, every attempt either one made (retries
+    included) -- summed via `_sum_costs`, so it's None if any contributing
+    call's cost is unknown. This is populated on the unparseable path too:
+    a pair that never produced a usable verdict still spent whatever its
+    calls cost, and `grade_matrix` needs that figure even for pairs it nulls
+    out of `judge`.
     """
     grok = grok or _default_grok
 
-    raw1, attempts1 = _call_grok_with_retry(
+    raw1, attempts1, cost1 = _call_grok_with_retry(
         grok, _judge_prompt(prompt, response_a, response_b), _JUDGE_SCHEMA, model=model)
-    raw2, attempts2 = _call_grok_with_retry(
+    raw2, attempts2, cost2 = _call_grok_with_retry(
         grok, _judge_prompt(prompt, response_b, response_a), _JUDGE_SCHEMA, model=model)
 
     w1 = _call_winner(raw1)  # "first" == a, "second" == b
@@ -561,7 +633,8 @@ def _judge_pair_impl(prompt, response_a, response_b, *, grok=None, model=None):
     # `model=None` is recorded too -- "the judge ran on whatever the config
     # default happened to be" is itself worth stating, not silently omitted
     # (review finding I10). `attempts` records whether a retry happened.
-    raw = [raw1, raw2, {"judge_model": model, "attempts": [attempts1, attempts2]}]
+    raw = [raw1, raw2, {"judge_model": model, "attempts": [attempts1, attempts2],
+                         "cost_usd": _sum_costs([cost1, cost2])}]
 
     if w1 is None or w2 is None:
         failures = []
@@ -677,6 +750,7 @@ def grade_matrix(matrix, *, prompt, grok=None, model=None):
             regs.append(turn_reg)
 
         judge = None
+        judge_cost_usd = None
         if control_ok and treatment_ok:
             verdict, unparseable, failure_detail = _judge_pair_impl(
                 prompt,
@@ -684,6 +758,11 @@ def grade_matrix(matrix, *, prompt, grok=None, model=None):
                 treatment_run.get("response_text", ""),
                 grok=grok, model=model,
             )
+            # Recorded regardless of `unparseable`: a pair that never
+            # produced a usable verdict still made real (charged) calls --
+            # see `_judge_pair_impl`'s docstring. `judge_cost` sums this
+            # across the matrix.
+            judge_cost_usd = verdict["raw"][-1]["cost_usd"]
             if unparseable:
                 # An unparseable pair is not a judged tie -- it's the absence
                 # of a judgment. Recording it as a fabricated tie is exactly
@@ -704,7 +783,14 @@ def grade_matrix(matrix, *, prompt, grok=None, model=None):
             else:
                 judge = verdict
 
-        grades.append(make_grade(
+        # `judge_cost_usd` rides along on the Grade dict rather than through
+        # `make_grade` (types.make_grade's shape is pinned elsewhere) -- an
+        # additive key, same technique `raw`/`judge_unavailable` already use
+        # to carry information make_grade's fixed fields don't have a slot
+        # for. None here means "no judge call ran for this pair" (check
+        # control_ok/treatment_ok, already on the Grade, to confirm that's
+        # why) -- not "the call was free".
+        g = make_grade(
             repeat=control_run.get("repeat", i),
             control_efficiency=control_eff,
             treatment_efficiency=treatment_eff,
@@ -712,6 +798,30 @@ def grade_matrix(matrix, *, prompt, grok=None, model=None):
             regressions=regs,
             control_ok=control_ok,
             treatment_ok=treatment_ok,
-        ))
+        )
+        g["judge_cost_usd"] = judge_cost_usd
+        grades.append(g)
 
     return grades
+
+
+def judge_cost(grades):
+    """Sum `judge_cost_usd` across every grade whose pair actually ran a
+    judge call (control_ok and treatment_ok -- the same condition
+    `grade_matrix` uses to decide whether to judge a pair at all).
+
+    Returns None -- never 0.0 -- both when no pair in `grades` ever ran a
+    judge call, and when any pair that did run one has an unknown cost: a
+    caller building a headline dollar total needs to know whether the number
+    it's about to add is complete, and in both cases the honest answer is
+    "don't trust this as a full total." `grades`' own `control_ok`/
+    `treatment_ok` fields already tell a caller which pairs were even
+    eligible to be judged, so this function doesn't need a second return
+    value to say so -- inspect those directly if the distinction matters.
+    """
+    attempted = [g for g in grades
+                 if g.get("control_ok", True) and g.get("treatment_ok", True)]
+    if not attempted:
+        return None
+    costs = [g.get("judge_cost_usd") for g in attempted]
+    return _sum_costs(costs)

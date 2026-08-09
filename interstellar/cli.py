@@ -68,11 +68,13 @@ silently:
     raises `SystemExit` after writing the report -- a cycle that produced no
     usable data is not a success, and exiting 0 would say otherwise.
   * The reported cycle cost includes replay runs, the live analyzer call,
-    and the preflight check -- it does NOT include judge (LLM-as-judge
-    grading) calls, which `grade.py`'s own default judge implementation
-    does not surface a cost for; the report says so explicitly
-    (`JUDGE_COST_CAVEAT`) rather than presenting a figure that silently
-    under-counts as if it were complete.
+    the preflight check, AND judge (LLM-as-judge grading) calls, folded in
+    via `grade.judge_cost`. That function returns `None` -- never coerced
+    to 0 -- both when no pair was judged and when one was but its cost is
+    unknown; `run_review` tells the two apart via the grades' own
+    `control_ok`/`treatment_ok` and, only in the second case, marks the
+    reported total a LOWER BOUND in the caveat (`_judge_cost_caveat`)
+    rather than presenting a partial figure as complete.
   * `_check_workspace_out_collision` refuses at plan time, before the
     preflight call, when `--out` and the trace's recorded workspace nest
     inside each other -- `replay.isolated_workdir` copies the workspace
@@ -829,21 +831,37 @@ def _cache_warmth_caveat(patch_results):
     )
 
 
-# The cost figure omits judge (LLM-as-judge grading) calls: grade.py's own
-# default judge implementation does not surface `total_cost_usd` anywhere
-# this module can read without reimplementing its call/retry/isolation
-# logic (final-review.md I1) -- doing that here would be exactly the "two
-# implementations of the same job" duplication final-review.md separately
-# flags elsewhere, so the honest fix on this side is disclosure, not a
-# parallel judge-calling path. Replay runs, the analyzer call, and the
-# preflight check ARE all folded into the total.
-JUDGE_COST_CAVEAT = (
-    "Reported cycle cost includes replay runs, the analyzer call (when not "
-    "--use-cached-analysis), and the preflight check -- it does NOT "
-    "include judge (LLM-as-judge grading) call costs, which are not "
-    "currently surfaced by the grading module. The true spend for this "
-    "cycle is higher than the figure shown."
-)
+def _judge_cost_caveat(judge_cost_unknown):
+    """What the reported cycle cost covers. Judge (LLM-as-judge grading)
+    call costs are now folded into the total via `grade.judge_cost`,
+    alongside replay runs, the live analyzer call, and the preflight
+    check -- this caveat used to state the opposite (judge calls
+    excluded) before grade.py started surfacing `judge_cost_usd`, and
+    must not go on saying that now that they're included.
+
+    `judge_cost_unknown` is True when at least one patch this cycle ran
+    judged pairs (`control_ok and treatment_ok`, `grade.judge_cost`'s own
+    eligibility condition) but `judge_cost` came back `None` for it --
+    "some judge calls ran, cost unknown" per `grade.judge_cost`'s own
+    contract, never coerced to 0 (`run_review` never does `or 0` on this
+    value; see the per-patch fold-in). In that case the reported total is
+    a LOWER BOUND, not a complete figure, and this says so explicitly --
+    a partially-complete total presented as complete is the same failure
+    the original caveat existed to prevent, just in a smaller form. When
+    no patch ever ran a judged pair, or every judge call's cost was known,
+    there is nothing missing and the caveat says so plainly instead."""
+    base = (
+        "Reported cycle cost includes replay runs, the analyzer call "
+        "(when not --use-cached-analysis), the preflight check, and judge "
+        "(LLM-as-judge grading) calls."
+    )
+    if judge_cost_unknown:
+        return (
+            base + " At least one judge call's cost could not be "
+            "determined this cycle, so the figure above is a LOWER BOUND "
+            "on the true spend, not a complete total."
+        )
+    return base
 
 
 def _base_extra_caveats(trace, baseline_source, baseline_version, estimate):
@@ -1265,6 +1283,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             total_cost += preflight_cost
 
     patch_results = []
+    judge_cost_unknown = False  # any patch ran judged pairs whose cost is unknown
 
     print(f"=== running review cycle: {len(selected_patches)} patch(es) selected, "
           f"k={k} ===")
@@ -1326,6 +1345,20 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
 
             grades = grade.grade_matrix(matrix, prompt=prompt, grok=judge_grok)
 
+            # None here is never "free" -- grade.judge_cost() returns None
+            # both when no pair ran a judge call and when one did but its
+            # cost is unknown; `or 0` would silently coerce the second
+            # case into a false zero. Distinguish them via the grades'
+            # own control_ok/treatment_ok (the same eligibility condition
+            # judge_cost/grade_matrix use) so the caveat can tell "nothing
+            # to add" from "the total is now a lower bound".
+            this_patch_judge_cost = grade.judge_cost(grades)
+            if this_patch_judge_cost is not None:
+                total_cost += this_patch_judge_cost
+            elif any(g.get("control_ok", True) and g.get("treatment_ok", True)
+                    for g in grades):
+                judge_cost_unknown = True
+
             summarize_fn = stats_summarize or _default_stats_summarize
             gate_fn = stats_gate or _default_stats_gate
             effect = patch["expected_effect"]
@@ -1382,7 +1415,8 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
         state["updated_at"] = now().isoformat()
         _write_json(progress_path, state)
 
-    extra_caveats = _base_extra_caveats(trace, *caveats_args) + [JUDGE_COST_CAVEAT]
+    extra_caveats = (_base_extra_caveats(trace, *caveats_args)
+                    + [_judge_cost_caveat(judge_cost_unknown)])
     cache_caveat = _cache_warmth_caveat(patch_results)
     if cache_caveat:
         extra_caveats = extra_caveats + [cache_caveat]

@@ -933,7 +933,12 @@ def _fake_runner(argv, **kwargs):
 
 
 def _fake_judge_grok(prompt_text, schema, model=None):
-    return {"winner": "tie", "reason": "fake judge"}
+    # grade.py's grok-callable contract reads a `cost_usd` field off the
+    # raw dict (grade._call_grok_with_retry); a known cost here keeps the
+    # default fixture on the "judge cost is fully known" path, so tests
+    # that don't care about the unknown-cost/lower-bound case aren't
+    # accidentally exercising it.
+    return {"winner": "tie", "reason": "fake judge", "cost_usd": 0.001}
 
 
 def _fake_stats_summarize(grades, *, primary_effect, seed=0):
@@ -1212,14 +1217,61 @@ class ProgressJournalTests(unittest.TestCase):
 
         rpt = self._run(runner=costed_runner)
         # 2 patches x 2 arms x k=1 x $0.002 (per _fake_runner) + one
-        # preflight call at $0.0111 -- the preflight's own real cost must
-        # show up in the total, not vanish (final-review.md I1).
-        self.assertAlmostEqual(rpt["cost_usd"], 4 * 0.002 + 0.0111, places=6)
+        # preflight call at $0.0111 (the preflight's own real cost must
+        # show up in the total, not vanish -- final-review.md I1) + judge
+        # cost: 2 patches x 1 pair x 2 position-swapped calls x $0.001
+        # (per _fake_judge_grok) = $0.004.
+        self.assertAlmostEqual(rpt["cost_usd"], 4 * 0.002 + 0.0111 + 0.004, places=6)
 
-    def test_report_names_what_the_cost_figure_excludes(self):
+    def test_judge_cost_is_folded_into_reported_cycle_cost(self):
+        # Isolate the judge contribution: no preflight, replay cost forced
+        # to 0 so only the judge calls' $0.001-each show up.
+        def zero_cost_runner(argv, **kwargs):
+            proc = _fake_runner(argv, **kwargs)
+            out = json.loads(proc.stdout)
+            out["total_cost_usd"] = 0.0
+            return _FakeCompletedProcess(json.dumps(out))
+
+        rpt = self._run(runner=zero_cost_runner, no_preflight=True)
+        # 2 patches x 1 pair x 2 position-swapped judge calls x $0.001.
+        self.assertAlmostEqual(rpt["cost_usd"], 4 * 0.001, places=6)
+
+    def test_report_states_judge_calls_are_now_included(self):
         rpt = self._run()
         caveats_text = " ".join(rpt["caveats"])
-        self.assertIn("does NOT include judge", caveats_text)
+        self.assertIn("includes replay runs", caveats_text)
+        self.assertIn("judge", caveats_text.lower())
+        self.assertNotIn("does NOT include judge", caveats_text)
+        self.assertNotIn("LOWER BOUND", caveats_text)
+
+    def test_unknown_judge_cost_marks_the_total_a_lower_bound(self):
+        def judge_with_unknown_cost(prompt_text, schema, model=None):
+            return {"winner": "tie", "reason": "fake judge"}  # no cost_usd
+
+        rpt = self._run(judge_grok=judge_with_unknown_cost)
+        caveats_text = " ".join(rpt["caveats"])
+        self.assertIn("LOWER BOUND", caveats_text)
+        self.assertIn("could not be determined", caveats_text)
+
+    def test_no_judged_pairs_does_not_claim_a_lower_bound(self):
+        # Treatment always fails, control always succeeds -- no pair is
+        # ever eligible for judging (grade_matrix requires BOTH ok), so
+        # grade.judge_cost() returns None with nothing actually missing.
+        # The caveat must not claim a lower bound when there is nothing
+        # to be a lower bound of.
+        def treatment_always_fails(argv, **kwargs):
+            env = kwargs.get("env") or {}
+            if "treatment" in env.get("GROK_HOME", ""):
+                return _FakeCompletedProcess("not json", returncode=1, stderr="boom")
+            return _fake_runner(argv, **kwargs)
+
+        rpt = self._run(runner=treatment_always_fails, no_preflight=True)
+        self.assertGreater(len(rpt["patch_results"]), 0)
+        for pr in rpt["patch_results"]:
+            for g in pr["grades"]:
+                self.assertIsNone(g["judge"])  # never eligible: treatment_ok is False
+        caveats_text = " ".join(rpt["caveats"])
+        self.assertNotIn("LOWER BOUND", caveats_text)
 
     def test_dropped_patches_appear_in_the_report_not_just_progress_json(self):
         # final-review.md I4: report.build(dropped_patches=) is the

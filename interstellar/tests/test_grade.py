@@ -375,8 +375,10 @@ class JudgePairTest(unittest.TestCase):
         self.assertEqual(verdict["verdict"], ARM_CONTROL)
         self.assertTrue(verdict["consistent"])
         self.assertEqual(len(verdict["raw"]), 3)
-        # No retry needed -- both calls succeed on the first attempt.
-        self.assertEqual(verdict["raw"][2], {"judge_model": None, "attempts": [1, 1]})
+        # No retry needed -- both calls succeed on the first attempt. The
+        # fake grok doesn't report cost_usd, so the pair total is unknown.
+        self.assertEqual(verdict["raw"][2],
+                          {"judge_model": None, "attempts": [1, 1], "cost_usd": None})
 
     def test_agreeing_orders_favoring_b_return_treatment(self):
         grok = _agreeing_grok("2")  # stable preference for response_b
@@ -416,7 +418,8 @@ class JudgePairTest(unittest.TestCase):
 
         verdict = judge_pair("do the thing", "a", "b", grok=fake, model="grok-4.5")
         self.assertEqual(seen, ["grok-4.5", "grok-4.5"])
-        self.assertEqual(verdict["raw"][2], {"judge_model": "grok-4.5", "attempts": [1, 1]})
+        self.assertEqual(verdict["raw"][2],
+                          {"judge_model": "grok-4.5", "attempts": [1, 1], "cost_usd": None})
 
     def test_a_call_that_fails_once_then_succeeds_is_retried_and_recovers(self):
         # Fix-round-3 ask #2: retry once before giving up. Each position
@@ -456,6 +459,42 @@ class JudgePairTest(unittest.TestCase):
         # 2 attempts per position order, 2 orders = 4 calls total, not more.
         self.assertEqual(len(calls), 4)
         self.assertEqual(verdict["raw"][2]["attempts"], [2, 2])
+
+    def test_cost_is_summed_across_both_position_orders(self):
+        def fake(prompt_text, schema, *, model=None):
+            return {"winner": "1", "reason": "fake", "cost_usd": 0.001}
+
+        verdict = judge_pair("do the thing", "a", "b", grok=fake)
+        # Two calls (one per order) at $0.001 each.
+        self.assertAlmostEqual(verdict["raw"][2]["cost_usd"], 0.002)
+
+    def test_retried_attempt_adds_its_own_cost_not_just_the_final_one(self):
+        # A recovered-on-retry pair costs more than a first-try pair, and
+        # the total must show that (not just the winning attempt's cost).
+        calls = {"order1": 0, "order2": 0}
+
+        def flaky(prompt_text, schema, *, model=None):
+            order = ("order1"
+                     if prompt_text.index("response a text") < prompt_text.index("## Response 2")
+                     else "order2")
+            calls[order] += 1
+            if calls[order] == 1:
+                return {"garbage": True, "cost_usd": 0.001}
+            return {"winner": "1" if order == "order1" else "2", "reason": "recovered",
+                    "cost_usd": 0.001}
+
+        verdict = judge_pair("do the thing", "response a text", "response b text", grok=flaky)
+        # 2 attempts per order x 2 orders x $0.001 = $0.004.
+        self.assertAlmostEqual(verdict["raw"][2]["cost_usd"], 0.004)
+
+    def test_one_call_with_unknown_cost_makes_the_pair_cost_none_not_partial(self):
+        def fake(prompt_text, schema, *, model=None):
+            # order1 (a, b) reports a real cost; order2 (b, a) doesn't.
+            order1 = prompt_text.index("response a text") < prompt_text.index("## Response 2")
+            return {"winner": "tie", "reason": "fake", "cost_usd": 0.001 if order1 else None}
+
+        verdict = judge_pair("do the thing", "response a text", "response b text", grok=fake)
+        self.assertIsNone(verdict["raw"][2]["cost_usd"])
 
     def test_response_text_is_fenced_with_unpredictable_per_call_markers(self):
         # I6: untrusted response text must be delimited, and the delimiter
@@ -764,6 +803,120 @@ class GradeMatrixTest(unittest.TestCase):
         grade_matrix(matrix, prompt="do the thing", grok=fake, model="grok-4.5")
         self.assertEqual(seen, ["grok-4.5", "grok-4.5"])
 
+    def test_judge_cost_usd_is_stamped_on_the_grade(self):
+        matrix = make_replay_matrix(
+            prompt="do the thing", k=1,
+            arms={
+                ARM_CONTROL: [make_run_result(
+                    arm=ARM_CONTROL, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/c", workdir="/tmp/cw", trace=_trace(), response_text="a",
+                )],
+                ARM_TREATMENT: [make_run_result(
+                    arm=ARM_TREATMENT, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/t", workdir="/tmp/tw", trace=_trace(), response_text="b",
+                )],
+            },
+            control_version_id="c1", treatment_version_id="t1",
+        )
+
+        def fake(prompt_text, schema, *, model=None):
+            return {"winner": "1", "reason": "fake", "cost_usd": 0.0015}
+
+        grades = grade_matrix(matrix, prompt="do the thing", grok=fake)
+        # 2 calls (position swap) x $0.0015.
+        self.assertAlmostEqual(grades[0]["judge_cost_usd"], 0.003)
+
+    def test_judge_cost_usd_is_recorded_even_when_the_pair_is_unparseable(self):
+        # A pair that never produced a usable verdict still made real,
+        # charged calls -- the cost must reach the Grade even though
+        # `judge` itself stays None for this pair.
+        matrix = make_replay_matrix(
+            prompt="do the thing", k=1,
+            arms={
+                ARM_CONTROL: [make_run_result(
+                    arm=ARM_CONTROL, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/c", workdir="/tmp/cw", trace=_trace(), response_text="a",
+                )],
+                ARM_TREATMENT: [make_run_result(
+                    arm=ARM_TREATMENT, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/t", workdir="/tmp/tw", trace=_trace(), response_text="b",
+                )],
+            },
+            control_version_id="c1", treatment_version_id="t1",
+        )
+
+        def broken_grok(prompt_text, schema, *, model=None):
+            return {"totally": "unrelated", "cost_usd": 0.002}
+
+        grades = grade_matrix(matrix, prompt="do the thing", grok=broken_grok)
+        self.assertIsNone(grades[0]["judge"])
+        # 2 attempts (retry, since no winner) per order x 2 orders x $0.002.
+        self.assertAlmostEqual(grades[0]["judge_cost_usd"], 0.008)
+
+    def test_judge_cost_usd_is_none_when_no_judge_call_ran(self):
+        matrix = make_replay_matrix(
+            prompt="do the thing", k=1,
+            arms={
+                ARM_CONTROL: [make_run_result(
+                    arm=ARM_CONTROL, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/c", workdir="/tmp/cw", trace=_trace(),
+                )],
+                ARM_TREATMENT: [make_run_result(
+                    arm=ARM_TREATMENT, repeat=0, ok=False, prompt="do the thing",
+                    home="/tmp/t", workdir="/tmp/tw", trace=None, error="crashed",
+                )],
+            },
+            control_version_id="c1", treatment_version_id="t1",
+        )
+
+        def unused_grok(*a, **k):
+            raise AssertionError("grok should not be called when a run failed")
+
+        grades = grade_matrix(matrix, prompt="do the thing", grok=unused_grok)
+        self.assertIsNone(grades[0]["judge_cost_usd"])
+
+
+# --------------------------------------------------------------------------
+# judge_cost()
+# --------------------------------------------------------------------------
+
+def _cost_graded(judge_cost_usd, *, control_ok=True, treatment_ok=True):
+    """A minimal Grade carrying only the fields judge_cost() reads."""
+    g = make_grade(repeat=0, control_efficiency={}, treatment_efficiency={},
+                    control_ok=control_ok, treatment_ok=treatment_ok)
+    g["judge_cost_usd"] = judge_cost_usd
+    return g
+
+
+class JudgeCostTest(unittest.TestCase):
+    def test_sums_known_costs_across_grades(self):
+        grades = [_cost_graded(0.002), _cost_graded(0.0035), _cost_graded(0.001)]
+        self.assertAlmostEqual(grade.judge_cost(grades), 0.0065)
+
+    def test_empty_grades_list_is_none_not_zero(self):
+        self.assertIsNone(grade.judge_cost([]))
+
+    def test_no_attempted_pairs_is_none_not_zero(self):
+        # Neither grade's pair was eligible for judging at all -- there is
+        # nothing to sum, and that must read as "unknown," not "$0 spent."
+        grades = [_cost_graded(None, control_ok=False),
+                  _cost_graded(None, treatment_ok=False)]
+        self.assertIsNone(grade.judge_cost(grades))
+
+    def test_one_unknown_cost_among_attempted_pairs_poisons_the_total(self):
+        # One pair's cost is known, the other's isn't -- summing only the
+        # known one would understate real spend, so the total must be None.
+        grades = [_cost_graded(0.002), _cost_graded(None)]
+        self.assertIsNone(grade.judge_cost(grades))
+
+    def test_ineligible_pairs_do_not_affect_the_sum_of_eligible_ones(self):
+        # A run-failure grade (no judge call attempted, cost is legitimately
+        # None) must not poison the total the way an attempted-but-unknown
+        # cost does -- judge_cost only sums over grades whose pair was
+        # actually eligible to be judged.
+        grades = [_cost_graded(0.002), _cost_graded(None, treatment_ok=False)]
+        self.assertAlmostEqual(grade.judge_cost(grades), 0.002)
+
 
 # --------------------------------------------------------------------------
 # _default_grok() field-parsing (C1) -- subprocess.run and harness.materialize
@@ -804,6 +957,27 @@ class DefaultGrokParsingTest(unittest.TestCase):
         self.assertEqual(result["reason"], "because")
         self.assertEqual(result["_source"], "structuredOutput")
 
+    def test_reads_total_cost_usd_into_cost_usd(self):
+        stdout = json.dumps({
+            "structuredOutput": {"winner": "1", "reason": "ok"},
+            "total_cost_usd": 0.00437,
+        })
+        result, _ = self._run_with_stdout(stdout)
+        self.assertEqual(result["cost_usd"], 0.00437)
+
+    def test_missing_total_cost_usd_is_none_not_zero(self):
+        stdout = json.dumps({"structuredOutput": {"winner": "1", "reason": "ok"}})
+        result, _ = self._run_with_stdout(stdout)
+        self.assertIsNone(result["cost_usd"])
+
+    def test_non_numeric_total_cost_usd_is_none_not_zero(self):
+        stdout = json.dumps({
+            "structuredOutput": {"winner": "1", "reason": "ok"},
+            "total_cost_usd": "not a number",
+        })
+        result, _ = self._run_with_stdout(stdout)
+        self.assertIsNone(result["cost_usd"])
+
     def test_structured_output_error_is_treated_as_unparseable(self):
         stdout = json.dumps({
             "text": '{"winner": "1", "reason": "irrelevant"}',
@@ -814,6 +988,26 @@ class DefaultGrokParsingTest(unittest.TestCase):
         self.assertIsNone(result.get("winner"))
         self.assertIn("did not match schema", result["error"])
         self.assertEqual(result["structured_output_state"], "null")
+
+    def test_cost_is_captured_even_when_the_call_is_otherwise_unparseable(self):
+        # A call that failed to produce a usable verdict still spent money --
+        # the cost must reach the caller regardless of the failure path.
+        stdout = json.dumps({
+            "text": "not the json you want",
+            "structuredOutput": None,
+            "structuredOutputError": "did not match schema",
+            "total_cost_usd": 0.0021,
+        })
+        result, _ = self._run_with_stdout(stdout)
+        self.assertIsNone(result.get("winner"))
+        self.assertEqual(result["cost_usd"], 0.0021)
+
+    def test_cost_is_none_when_the_subprocess_never_produces_stdout_json(self):
+        import subprocess
+        with mock.patch("interstellar.grade.subprocess.run",
+                         side_effect=subprocess.TimeoutExpired(cmd="grok", timeout=1)):
+            result = grade._default_grok("prompt", grade._JUDGE_SCHEMA)
+        self.assertIsNone(result["cost_usd"])
 
     def test_max_turns_exhaustion_is_diagnosable_not_a_bare_failure(self):
         # Fix-round-3 root cause, reproduced verbatim against the real
@@ -846,10 +1040,12 @@ class DefaultGrokParsingTest(unittest.TestCase):
         self.assertEqual(result["structured_output_state"], "absent")
 
     def test_falls_back_to_text_only_when_structured_output_absent(self):
-        stdout = json.dumps({"text": '{"winner": "tie", "reason": "ok"}'})
+        stdout = json.dumps({"text": '{"winner": "tie", "reason": "ok"}',
+                              "total_cost_usd": 0.003})
         result, _ = self._run_with_stdout(stdout)
         self.assertEqual(result["winner"], "tie")
         self.assertEqual(result["_source"], "text_fallback")
+        self.assertEqual(result["cost_usd"], 0.003)
 
     def test_text_fallback_that_is_not_json_is_unparseable_not_raising(self):
         stdout = json.dumps({"text": "sorry, I can't do that"})
