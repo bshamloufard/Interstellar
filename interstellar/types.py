@@ -175,12 +175,20 @@ def make_patch_application(*, patch_id, applied, reason="", diff="",
 
 def make_run_result(*, arm, repeat, ok, prompt, home, workdir,
                     session_id=None, trace=None, response_text="",
-                    cost_usd=None, wall_s=None, turns=None, error=None,
-                    argv=None):
+                    cost_usd=None, wall_s=None, turns=None, usage=None,
+                    error=None, argv=None):
     """One execution of one prompt under one harness.
 
     `trace` is the normalized trace dict (normalizer/schema.py shape) or None
     when the run failed. Nothing downstream may assume it is present.
+
+    `usage` is grok's own token accounting, taken verbatim from the headless
+    stdout JSON: `{input_tokens, cache_read_input_tokens,
+    cache_creation_input_tokens, output_tokens, reasoning_tokens,
+    total_tokens}`. It lives here rather than on the trace because the
+    normalizer works from the session store, which records no token counts —
+    so token and cost figures are only ever available on the RunResult. Any
+    grader wanting them must read the run, not the trace.
     """
     return {
         "arm": arm,                  # ARM_CONTROL | ARM_TREATMENT
@@ -195,6 +203,7 @@ def make_run_result(*, arm, repeat, ok, prompt, home, workdir,
         "cost_usd": cost_usd,
         "wall_s": wall_s,
         "turns": turns,
+        "usage": dict(usage or {}),
         "error": error,
         "argv": list(argv or []),
     }
