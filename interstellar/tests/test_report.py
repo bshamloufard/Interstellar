@@ -735,6 +735,330 @@ class WriteTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", html_text)
 
 
+class DiffViewTests(unittest.TestCase):
+    """Task 1: the diff view is a real diff -- line-number gutters, a
+    change-summary header (path, +/-, kind, and the skill.truncate removed-
+    fraction line), and word-level highlighting for close-matching del/add
+    pairs, verified against real rendered HTML (report._diff_html and its
+    helpers are not unit-tested in isolation -- these go through build() +
+    write() + read the file, same as WriteTests, per the team's own
+    "verify against real HTML" method)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out_dir = Path(self.tmp.name) / "out"
+
+    def _build_and_write(self, patch_results, k=3):
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=patch_results, k=k, cost_usd=2.5,
+        )
+        report.write(rpt, self.out_dir)
+        return rpt
+
+    def _html(self):
+        return (self.out_dir / "index.html").read_text(encoding="utf-8")
+
+    def test_diff_summary_header_shows_path_counts_and_kind(self):
+        self._build_and_write([_accepted_patch_result()], k=12)
+        html_text = self._html()
+        self.assertIn('<span class="diff-file">skills/verbose-skill/SKILL.md</span>', html_text)
+        self.assertIn('<span class="diff-add-count">+1</span>', html_text)
+        self.assertIn('<span class="diff-del-count">&minus;2</span>', html_text)
+        self.assertIn('<span class="diff-kind">skill.truncate</span>', html_text)
+
+    def test_diff_has_old_and_new_line_number_gutters(self):
+        self._build_and_write([_accepted_patch_result()], k=12)
+        html_text = self._html()
+        self.assertIn('class="diff-table"', html_text)
+        # SAMPLE_DIFF's hunk is "@@ -10,3 +10,1 @@" -- the first del row is
+        # old line 10 with no new-side line; the add row is new line 10.
+        self.assertIn('<tr class="diff-row del"><td class="ln old">10</td><td class="ln new"></td>', html_text)
+        self.assertIn('<tr class="diff-row add"><td class="ln old"></td><td class="ln new">10</td>', html_text)
+
+    def test_truncate_fraction_line_states_removed_of_file_span(self):
+        self._build_and_write([_truncate_fraction_patch_result()], k=3)
+        html_text = self._html()
+        # numerator from lines_changed=60; denominator from the hunk header
+        # (old_start=66, old_count=60 -> old_end=125), not a stored total.
+        self.assertIn("removes 60 of 125 lines", html_text)
+
+    def test_fraction_line_absent_for_non_truncate_or_no_line_ranges(self):
+        # _accepted_patch_result is skill.truncate but its line_ranges are
+        # unset (None) and lines_changed=2 comes only from the fixture's
+        # generic `2 if diff else 0` -- with no line_ranges to fall back on
+        # and lines_changed present, the fraction line still requires a
+        # real hunk extent; assert this doesn't crash and only appears
+        # when the dedicated fixture provides real ranges.
+        self._build_and_write([_accepted_patch_result()], k=12)
+        html_text = self._html()
+        self.assertNotIn("of 125 lines", html_text)
+
+    def test_close_match_del_add_pair_gets_word_level_marks(self):
+        self._build_and_write([_word_level_diff_patch_result()], k=3)
+        html_text = self._html()
+        self.assertIn('<mark class="chg-del">typo</mark>', html_text)
+        self.assertIn('<mark class="chg-add">typoo</mark>', html_text)
+        # the unchanged surrounding words are NOT wrapped in a mark
+        self.assertIn("This line has a small ", html_text)
+
+    def test_dissimilar_pair_is_not_force_highlighted(self):
+        # SAMPLE_DIFF pairs "This is a wordy paragraph..." with "Trimmed."
+        # -- far below _CLOSE_MATCH_RATIO -- must render plain, no <mark>.
+        self._build_and_write([_accepted_patch_result()], k=12)
+        html_text = self._html()
+        self.assertNotIn("<mark", html_text)
+
+    def test_no_diff_still_renders_muted_message(self):
+        self._build_and_write([_directional_patch_result()], k=1)  # diff=""
+        html_text = self._html()
+        self.assertIn('<p class="muted">No diff.</p>', html_text)
+
+
+class RunPanelTests(unittest.TestCase):
+    """Task 2: the run panel's static HTML -- trace file wiring, the k
+    allow-list rendered as the only selectable options, and the disabled
+    state when no trace file is on the report."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out_dir = Path(self.tmp.name) / "out"
+
+    def _build_and_write(self, k, session=None):
+        rpt = report.build(
+            session=session or _session(), baseline_version=_baseline_version(),
+            patch_results=[_accepted_patch_result()], k=k,
+        )
+        report.write(rpt, self.out_dir)
+        return rpt
+
+    def _html(self):
+        return (self.out_dir / "index.html").read_text(encoding="utf-8")
+
+    def test_run_panel_carries_the_trace_file_and_k_choices(self):
+        rpt = self._build_and_write(k=5)
+        html_text = self._html()
+        self.assertIn('id="run-panel"', html_text)
+        self.assertIn(f'data-trace="{report._esc(_session()["trace_file"])}"', html_text)
+        self.assertIn('id="run-btn"', html_text)
+        self.assertEqual(rpt["rerun"]["k_choices"], [3, 5, 10])
+        # current k (5) is preselected
+        self.assertIn('<option value="5" selected>5</option>', html_text)
+
+    def test_run_panel_defaults_to_k5_when_current_k_is_outside_the_choices(self):
+        self._build_and_write(k=12)
+        html_text = self._html()
+        self.assertIn('<option value="5" selected>5</option>', html_text)
+        self.assertNotIn('<option value="12"', html_text)
+
+    def test_run_panel_disabled_when_no_trace_file_on_report(self):
+        self._build_and_write(k=5, session={"session_id": "no-trace-session"})
+        html_text = self._html()
+        self.assertIn("Re-run unavailable", html_text)
+        self.assertNotIn('id="run-btn"', html_text)
+
+    def test_build_persists_rerun_config(self):
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=[], k=5, rerun_args={"model": "grok-4", "seed": 7},
+        )
+        self.assertEqual(rpt["rerun"]["trace_file"], _session()["trace_file"])
+        self.assertEqual(rpt["rerun"]["k_choices"], [3, 5, 10])
+        self.assertEqual(rpt["rerun"]["args"], {"model": "grok-4", "seed": 7})
+
+    def test_build_rerun_args_default_empty(self):
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=[], k=5,
+        )
+        self.assertEqual(rpt["rerun"]["args"], {})
+
+
+def _shutdown_server(httpd, thread):
+    httpd.shutdown()
+    thread.join(timeout=5)
+    httpd.server_close()
+
+
+class RunEndpointTests(unittest.TestCase):
+    """Task 2: the /run + /status endpoints against a real loopback HTTP
+    server. `argv_builder` is swapped for a fast, free, real subprocess
+    (see _RunManager's docstring) -- never the actual `python3 -m
+    interstellar review` cycle, which costs money and takes minutes. This
+    exercises the real threading/status/HTTP path, not a mock of it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out_dir = Path(self.tmp.name) / "out"
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=[_accepted_patch_result()], k=12,
+        )
+        report.write(rpt, self.out_dir)
+
+    def _serve(self, out_dir=None, argv_builder=None):
+        httpd = report.make_server(out_dir or self.out_dir, host="127.0.0.1", port=0, argv_builder=argv_builder)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(_shutdown_server, httpd, thread)
+        return httpd
+
+    def _conn(self, httpd):
+        return http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+
+    def _post_run(self, httpd, payload):
+        conn = self._conn(httpd)
+        conn.request("POST", "/run", body=json.dumps(payload).encode("utf-8"),
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
+        return resp.status, body
+
+    def _get_status(self, httpd):
+        conn = self._conn(httpd)
+        conn.request("GET", "/status")
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
+        return body
+
+    def _wait_until_finished(self, httpd, timeout=10):
+        deadline = time.time() + timeout
+        status = self._get_status(httpd)
+        while status["status"] == "running" and time.time() < deadline:
+            time.sleep(0.05)
+            status = self._get_status(httpd)
+        return status
+
+    def test_status_is_idle_before_any_run(self):
+        httpd = self._serve()
+        status = self._get_status(httpd)
+        self.assertEqual(status["status"], "idle")
+        self.assertIsNone(status["k"])
+        self.assertIsNone(status["elapsed_s"])
+
+    def test_run_rejects_k_outside_the_allow_list(self):
+        httpd = self._serve()
+        status_code, body = self._post_run(httpd, {"k": 7})
+        self.assertEqual(status_code, 400)
+        self.assertIn("k must be one of", body["error"])
+        self.assertEqual(self._get_status(httpd)["status"], "idle")
+
+    def test_run_rejects_non_integer_and_boolean_k(self):
+        httpd = self._serve()
+        for bad_k in ["5", True, 5.0, None]:
+            status_code, body = self._post_run(httpd, {"k": bad_k})
+            self.assertEqual(status_code, 400, f"k={bad_k!r} should be rejected")
+
+    def test_run_spawns_a_real_subprocess_and_status_reflects_completion(self):
+        seen = {}
+
+        def fake_argv_builder(*, trace_file, out_dir, k, args):
+            seen["trace_file"] = trace_file
+            seen["out_dir"] = out_dir
+            seen["k"] = k
+            seen["args"] = args
+            return [sys.executable, "-c", "import time; time.sleep(0.1)"]
+
+        httpd = self._serve(argv_builder=fake_argv_builder)
+        status_code, body = self._post_run(httpd, {"k": 10})
+        self.assertEqual(status_code, 202)
+        self.assertEqual(body["status"], "running")
+
+        status = self._wait_until_finished(httpd)
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(status["returncode"], 0)
+        # only k came from the request body -- trace_file/out_dir/args all
+        # came from the server-side stored rerun config (see build()).
+        self.assertEqual(seen["k"], 10)
+        self.assertEqual(seen["trace_file"], _session()["trace_file"])
+        self.assertEqual(seen["out_dir"], self.out_dir.resolve())
+
+    def test_run_failure_surfaces_the_error_not_silent_idle(self):
+        def failing_argv_builder(*, trace_file, out_dir, k, args):
+            return [
+                sys.executable, "-c",
+                "import sys; sys.stderr.write('boom: patch application failed'); sys.exit(3)",
+            ]
+
+        httpd = self._serve(argv_builder=failing_argv_builder)
+        self._post_run(httpd, {"k": 3})
+        status = self._wait_until_finished(httpd)
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["returncode"], 3)
+        self.assertIn("boom: patch application failed", status["error"])
+
+    def test_run_refuses_a_second_run_while_one_is_in_flight(self):
+        def slow_argv_builder(*, trace_file, out_dir, k, args):
+            return [sys.executable, "-c", "import time; time.sleep(1.0)"]
+
+        httpd = self._serve(argv_builder=slow_argv_builder)
+        status_code, _ = self._post_run(httpd, {"k": 3})
+        self.assertEqual(status_code, 202)
+
+        status_code, body = self._post_run(httpd, {"k": 5})
+        self.assertEqual(status_code, 409)
+        self.assertIn("already running", body["error"])
+        self._wait_until_finished(httpd)
+
+    def test_run_rejects_when_no_trace_file_is_configured(self):
+        rpt = report.build(
+            session={"session_id": "no-trace"}, baseline_version=_baseline_version(),
+            patch_results=[_accepted_patch_result()], k=12,
+        )
+        out_dir2 = Path(self.tmp.name) / "out2"
+        report.write(rpt, out_dir2)
+        httpd = self._serve(out_dir=out_dir2)
+        status_code, body = self._post_run(httpd, {"k": 5})
+        self.assertEqual(status_code, 400)
+        self.assertIn("no trace file", body["error"])
+
+    def test_run_ignores_every_body_field_except_k(self):
+        # C-1 (non-negotiable per the brief): the endpoint must not accept
+        # an arbitrary command/path/argument string from the request --
+        # extra fields in the body are simply never read.
+        seen = {}
+
+        def spy_argv_builder(*, trace_file, out_dir, k, args):
+            seen["k"] = k
+            return [sys.executable, "-c", "pass"]
+
+        httpd = self._serve(argv_builder=spy_argv_builder)
+        status_code, _ = self._post_run(httpd, {
+            "k": 3, "trace": "/etc/passwd", "cmd": "rm -rf /", "out": "/tmp/evil",
+            "args": ["--grok-home", "/etc"],
+        })
+        self.assertEqual(status_code, 202)
+        self._wait_until_finished(httpd)
+        self.assertEqual(seen.get("k"), 3)
+
+    def test_run_argv_only_uses_allow_listed_flags_from_stored_config(self):
+        # A stored rerun.args key not in _RERUN_ARG_SPEC must be dropped,
+        # not turned into an unexpected flag -- defense in depth on top of
+        # the request never reaching this dict at all.
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=[_accepted_patch_result()], k=12,
+            rerun_args={"model": "grok-4", "seed": 7, "not_a_real_flag": "evil"},
+        )
+        out_dir3 = Path(self.tmp.name) / "out3"
+        report.write(rpt, out_dir3)
+        argv = report._build_rerun_argv(
+            trace_file="/tmp/trace.json", out_dir=Path("/tmp/out"), k=5,
+            args=rpt["rerun"]["args"],
+        )
+        self.assertIn("--model", argv)
+        self.assertIn("grok-4", argv)
+        self.assertIn("--seed", argv)
+        self.assertIn("7", argv)
+        self.assertNotIn("--not-a-real-flag", argv)
+        self.assertNotIn("evil", argv)
+
+
 class FixRound3ReviewTests(unittest.TestCase):
     """Every Critical/Important from review-report.md, verified against the
     real HTML the fix produces (not just that the function returns
