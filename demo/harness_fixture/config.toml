@@ -1,0 +1,47 @@
+[mcp_servers.filesystem]
+command = "npx"
+args = [
+  "-y",
+  "@modelcontextprotocol/server-filesystem",
+  "/Users/sentorcc/interstellar-demo/checkout",
+]
+startup_timeout_sec = 120
+tool_timeout_sec = 60
+
+[mcp_servers.memory]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+env = { MEMORY_FILE_PATH = "/Users/sentorcc/.grok-interstellar-demo/memory.jsonl" }
+startup_timeout_sec = 120
+tool_timeout_sec = 60
+
+[mcp_servers.sequential-thinking]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+startup_timeout_sec = 120
+tool_timeout_sec = 60
+
+[mcp_servers.everything]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-everything"]
+startup_timeout_sec = 120
+tool_timeout_sec = 180
+tool_timeouts = { "trigger-long-running-operation" = 300 }
+
+[mcp_servers.time]
+command = "uvx"
+args = ["mcp-server-time", "--local-timezone=America/Los_Angeles"]
+startup_timeout_sec = 120
+tool_timeout_sec = 30
+
+# ############################################################################
+# ## INTENTIONAL FAILURE — THIS SERVER WILL NOT CONNECT.                    ##
+# ## GitHub's official remote MCP server requires OAuth or a PAT. With no   ##
+# ## credential it returns HTTP 401 on initialize. Short startup timeout so ##
+# ## it fails fast instead of stalling session start.                      ##
+# ############################################################################
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+enabled = true
+startup_timeout_sec = 10
+tool_timeout_sec = 30

@@ -6,3 +6,4 @@
 __pycache__/
 *.pyc
 synth/workspace/
+demo/_verify_out/
