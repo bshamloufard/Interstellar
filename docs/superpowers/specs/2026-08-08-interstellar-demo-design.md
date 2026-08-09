@@ -12,9 +12,11 @@ numbers. The presenter drives the whole thing live inside grok-build — open th
 fabricated session from `/dashboard`, run `/interstellar` to visualize it, then prompt
 the agent to run the review-loop, which spends real API calls doing real work.
 
-**My job before handoff:** build every piece and run the full pipeline myself at least
-once, so what the presenter does live is a repeat of a verified-good run, not a first
-attempt.
+**My job before handoff:** build every piece for real — demo repo, harness, and the
+fabricated "already-completed" session — and verify it with the free/cheap checks
+(local `pytest`, session load, normalize, one `--dry-run` analyzer pass). I do **not**
+run the full live `--k 5` sandbox cycle myself; that costs real spend and is the
+moment the presenter triggers live, for real, during the recording.
 
 **Non-goal:** I do not capture video. The deliverable is the environment plus a shot
 list; the presenter records their own screen.
@@ -105,27 +107,26 @@ and fixes the real bug in `pricing.py`, and finishes with `pytest` green. Roughl
 35-50 tool-call-level events, several minutes of fabricated wall time — a dramatic
 (~6-8x) contrast against the minimal correct path.
 
-### 4. Real pipeline run (I execute this before handoff)
+### 4. Pre-handoff verification (cheap/free only — I execute this)
 
 1. Normalize the fabricated session with the real normalizer → canonical `trace.json`.
 2. Sanity-check it: `python3 -m interstellar review trace.json --dry-run` and eyeball
-   the digest for the expected findings.
-3. Run it for real: `python3 -m interstellar review trace.json --grok-home
-   ~/.grok-interstellar-demo --out ~/interstellar-demo/runs/checkout --k 5 --serve`.
-   `k=5` (not the CLI default 3) so the gate can reach a real `ACCEPTED`/`REJECTED`
-   verdict instead of only `DIRECTIONAL` — a stronger badge for camera. This is a real
-   sandboxed cycle: live grok-dev re-runs the *original prompt* k times against the
-   real bad harness (control) and a real patched harness (treatment), in isolation,
-   then grades pairwise and produces `index.html`.
-4. Confirm the report shows a favorable, non-flaky story (real efficiency deltas,
-   quality held, no manufactured improvement) before calling it done. If a `k=5` cycle
-   comes out noisy or unfavorable, I'll iterate on the harness/skill severity rather
-   than the review-loop's math.
+   the digest for the expected findings (this is the one step that spends real money —
+   a single cheap analyzer call, roughly $0.05, no sandbox replay).
+3. Confirm the `--dry-run` output selects patches covering the intended finding types
+   (`skill_truncate` on the bloated/misdirecting skill, `mcp_fix_broken` on `github`,
+   `mcp_latency` on `everything`, `mcp_remove` on the idle fleet, `tool_redundant` on
+   the re-read pattern) at reasonable confidence, without inventing anything the digest
+   doesn't back.
+4. Minimal-path sanity, entirely local/free: confirm the *correct* fix to `pricing.py`
+   and that `pytest` goes green in a clean copy of the demo repo, so the "ideal"
+   comparison point is real, not assumed.
 
-**Cost/time flag:** this step spends real API money (rough order $1-3 for a k=5 cycle
-across the selected patches) and takes several minutes of wall time. I'll run it as
-part of building this, and may re-run once or twice while tuning — flagging before I
-start.
+**What I deliberately do not run:** the full `python3 -m interstellar review ... --k 5
+--serve` sandboxed cycle. That's a real, several-minutes, ~$1-3 live replay — it's the
+"agent runs again" moment, and it belongs to the recording, triggered by the presenter
+prompting the agent live. Everything I build should make that live run land well the
+first time, without me having spent the money to pre-confirm the final scorecard.
 
 ### 5. Live trigger mechanism (what the presenter does)
 
@@ -165,11 +166,17 @@ in what order, with rough timings) delivered alongside the built environment.
 ## Risks
 
 - **Live model variance in the control arm.** The real replay's control runs may not
-  reproduce the fabricated session's exact wastefulness — mitigated by `k=5` and by
-  making the harness's badness structural (broken/idle MCPs and skill bloat cost the
-  same regardless of model choices), not solely behavioral.
-- **Cost creep from iterating on severity.** Bounded by running `--dry-run` first each
-  tuning pass and only spending on a full cycle once the digest looks right.
+  reproduce the fabricated session's exact wastefulness — mitigated by recommending
+  `k=5` in the shot list (not the CLI default 3, so the gate can reach a real
+  `ACCEPTED`/`REJECTED` instead of only `DIRECTIONAL`) and by making the harness's
+  badness structural (broken/idle MCPs and skill bloat cost the same regardless of
+  model choices), not solely behavioral.
+- **I never see the full live cycle before handoff, so I can't empirically confirm the
+  final scorecard.** Mitigated by erring generous on severity/margin in the harness
+  (each issue costs clearly more than the analyzer's materiality floors in
+  `analyzer/prompt.md` — e.g. skill waste well above the 150-token floor, MCP latency
+  well above 2000ms) and by the `--dry-run` digest check, which does run for real and
+  catches a digest that's too thin before any live spend happens.
 - **Agent doesn't reach for the right CLI invocation unprompted.** Mitigated by
   handing the presenter an exact, explicit trigger prompt rather than relying on
   discovery.
@@ -180,7 +187,7 @@ in what order, with rough timings) delivered alongside the built environment.
 2. `~/.grok-interstellar-demo/` harness (bloated/misdirecting skill, MCP config,
    auth.json).
 3. Session-generator script + the fabricated session it produces, verified to load
-   and normalize cleanly.
-4. One completed real `--k 5` review-loop run with a favorable `index.html`/
-   `report.json`.
-5. Shot list + the exact live trigger prompt for the presenter.
+   and normalize cleanly, with a `--dry-run` analyzer pass confirming the intended
+   findings surface.
+4. Shot list + the exact live trigger prompt for the presenter (the full `--k 5`
+   review-loop run happens live, during the recording, not pre-run by me).
