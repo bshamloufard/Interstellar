@@ -251,6 +251,719 @@ function renderHeader(pkg) {
   ].join("");
 }
 
+const SEV_RANK = { alert: 0, warn: 1, info: 2 };
+
+/** Shell builtins / wrappers we skip when finding the "real" command. */
+const SHELL_SKIP = new Set([
+  "sudo",
+  "command",
+  "env",
+  "nice",
+  "nohup",
+  "time",
+  "timeout",
+  "stdbuf",
+  "bash",
+  "sh",
+  "zsh",
+  "fish",
+  "exec",
+  // common builtins / not useful families
+  "cd",
+  "echo",
+  "printf",
+  "export",
+  "set",
+  "unset",
+  "source",
+  ".",
+  "eval",
+  "read",
+  "test",
+  "[",
+  "[[",
+  "true",
+  "false",
+  "exit",
+  "return",
+  "wait",
+  "type",
+  "alias",
+  "declare",
+  "local",
+  "readonly",
+  "pwd",
+  "pushd",
+  "popd",
+  "let",
+  "umask",
+  "ulimit",
+  "hash",
+  "help",
+  "history",
+  "jobs",
+  "fg",
+  "bg",
+  "shift",
+  "getopts",
+  "trap",
+  "kill",
+  // keywords
+  "for",
+  "do",
+  "done",
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "while",
+  "until",
+  "case",
+  "esac",
+  "in",
+  "select",
+  "function",
+  "time",
+]);
+
+/** Prefer these when present early in the command line. */
+const KNOWN_SET = new Set(
+  `
+  git gh hub svn hg bzr
+  cargo rustc rustup rustfmt clippy
+  go gofmt
+  npm npx yarn pnpm bun deno node tsx tsc
+  python python3 pip pip3 uv poetry pipenv conda mamba pytest ruff mypy black
+  docker docker-compose podman kubectl helm kind minikube
+  curl wget ssh scp rsync aria2c
+  find fd grep rg ag sed awk xargs jq yq
+  cat head tail less tee wc sort uniq diff patch
+  ls which whereis file stat du df
+  tar zip unzip gzip
+  make cmake ninja bazel
+  clang gcc g++ cc c++ protoc
+  brew apt apt-get yum dnf pacman nix
+  aws gcloud az gsutil
+  terraform tofu ansible pulumi
+  vim nvim code cursor claude codex grok
+  open osascript pbcopy pbpaste
+  ps top htop lsof ping dig nc
+  ffmpeg ffprobe convert magick pandoc
+  sqlite3 psql mysql redis-cli
+  java javac mvn gradle dotnet
+  ruby gem bundle perl php composer
+  swift xcrun xcodebuild
+  `.trim().split(/\s+/).filter(Boolean)
+);
+
+/**
+ * Pull the shell `command` string out of tool input_preview (JSON may be truncated).
+ */
+function extractShellCommandText(call) {
+  const prev = call.input_preview?.text || "";
+  if (!prev) return "";
+  try {
+    const j = JSON.parse(prev);
+    if (typeof j.command === "string") return j.command;
+    if (typeof j.cmd === "string") return j.cmd;
+  } catch {
+    /* truncated JSON — fall through */
+  }
+  // Match "command": ".... with possible truncation (no closing quote)
+  const m = prev.match(/"command"\s*:\s*"((?:\\.|[^"\\])*)(?:"|$)/);
+  if (m) {
+    try {
+      return JSON.parse(`"${m[1]}"`);
+    } catch {
+      return m[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    }
+  }
+  // Not JSON-shaped — only use raw if it doesn't look like our tool envelope
+  if (!/^\s*\{/.test(prev) && !/"variant"\s*:/.test(prev)) return prev;
+  return "";
+}
+
+/**
+ * Extract primary command family from a tool call (one layer under tool name).
+ * e.g. run_terminal_command + "cd x && git status" → "git"
+ */
+function shellCommandFamily(call) {
+  const name = call.tool_name || "";
+  if (name !== "run_terminal_command" && name !== "bash") {
+    return null;
+  }
+  const cmd = extractShellCommandText(call);
+  if (!cmd || typeof cmd !== "string") return "shell";
+
+  // Prefer first non-comment, non-trivial segment across the script
+  const segments = cmd
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"));
+
+  const normalizeBase = (tok) => {
+    let base = tok.replace(/^["']|["']$/g, "");
+    base = base.split("/").pop() || base;
+    base = base.toLowerCase();
+    if (/^python\d/.test(base)) return "python";
+    if (base === "rg" || base === "ag") return "grep";
+    if (base === "nodejs") return "node";
+    if (base.endsWith(".py")) return "python";
+    if (base.startsWith("grok") || base.startsWith("xai-grok")) return "grok";
+    if (base === "docker-compose") return "docker";
+    if (base === "podman-compose") return "podman";
+    return base;
+  };
+
+  const isJunkTok = (tok) => {
+    if (!tok || tok.startsWith("-") || tok.startsWith("#")) return true;
+    if (/[{}:"]/.test(tok)) return true;
+    if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f-]{10,}/i.test(tok)) return true;
+    if (/^[0-9a-f]{32,}$/i.test(tok)) return true;
+    if (/^https?:\/\//i.test(tok)) return true;
+    const base = normalizeBase(tok);
+    if (base.includes("%2f") || base.startsWith("%")) return true;
+    if (base.startsWith(".")) return true;
+    if (base.length <= 1) return true;
+    if (SHELL_SKIP.has(base)) return true;
+    return false;
+  };
+
+  // 1) Prefer a known CLI anywhere in the early command text (git/cargo/curl/…)
+  const scan = cmd.slice(0, 400);
+  const rawToks = scan.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  for (const raw of rawToks) {
+    if (isJunkTok(raw)) continue;
+    const base = normalizeBase(raw);
+    if (KNOWN_SET.has(base)) return base;
+  }
+
+  // 2) Fall back: first non-junk token of first useful segment
+  const trySegment = (seg) => {
+    let part = seg.trim();
+    part = part.replace(
+      /^(?:cd\s+(?:[^\s;&|]+|"[^"]*"|'[^']*')\s*(?:&&|;)\s*)+/i,
+      ""
+    );
+    part = part.split(/\|/)[0];
+    part = part.split(/&&|\|\||;/)[0].trim();
+    while (/^[A-Za-z_][A-Za-z0-9_]*=\S+\s+/.test(part)) {
+      part = part.replace(/^[A-Za-z_][A-Za-z0-9_]*=\S+\s+/, "");
+    }
+    part = part.replace(/^[({]+\s*/, "");
+    if (!part || part.startsWith("#")) return null;
+
+    const tokens = part.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+    for (const raw of tokens) {
+      if (isJunkTok(raw)) continue;
+      return normalizeBase(raw).slice(0, 40);
+    }
+    return null;
+  };
+
+  for (const seg of segments) {
+    const hit = trySegment(seg);
+    if (hit) return hit;
+  }
+  return trySegment(cmd) || "shell";
+}
+
+/** Label for display: shell tool broken down by command family. */
+function toolDisplayKey(call) {
+  const fam = shellCommandFamily(call);
+  if (fam) return `${call.tool_name} → ${fam}`;
+  return call.tool_name || "unknown";
+}
+
+function median(nums) {
+  if (!nums.length) return null;
+  const a = [...nums].sort((x, y) => x - y);
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+function timelineEventIdForEvidence(ev) {
+  if (!ev || !state.pkg) return null;
+  const tl = state.pkg.timeline || [];
+  if (ev.type === "tool") {
+    const hit = tl.find(
+      (e) => e.entity_type === "tool" && (e.entity_id === ev.id || e.event_id?.includes(ev.id))
+    );
+    return hit?.event_id || null;
+  }
+  if (ev.type === "turn") {
+    const hit = tl.find((e) => e.entity_type === "turn" && (e.entity_id === ev.id || e.turn_id === ev.id));
+    return hit?.event_id || null;
+  }
+  if (ev.type === "compaction") {
+    const hit = tl.find(
+      (e) =>
+        (e.kind === "compaction" || e.entity_type === "compaction") &&
+        (e.entity_id === ev.id || e.event_id === ev.id || String(e.tokens_before) === String(ev.id))
+    );
+    return hit?.event_id || tl.find((e) => e.kind === "compaction")?.event_id || null;
+  }
+  if (ev.type === "event") return ev.id;
+  return null;
+}
+
+/**
+ * Rule-based insights from the existing package schema (no LLM).
+ * @returns {{ insights: object[], metrics: object }}
+ */
+function buildInsights(pkg) {
+  const insights = [];
+  const turns = pkg.turns?.turns || [];
+  const calls = pkg.tools?.calls || [];
+  const byName = pkg.tools?.by_name || {};
+  const skills = pkg.skills || {};
+  const sig = pkg.signals || {};
+  const comps = pkg.compactions?.events || [];
+  const mcp = pkg.mcp || {};
+
+  const toolWall = calls.reduce((s, c) => s + (Number(c.span?.duration_ms) || 0), 0);
+  const turnWall = turns.reduce((s, t) => s + (Number(t.span?.duration_ms) || 0), 0);
+  const wallSec = sig.activity?.session_duration_seconds;
+  const toolOk = pkg.tools?.effectiveness?.success_rate;
+  const nTurns = turns.length;
+  const nTools = calls.length;
+
+  // 1) Headline — always
+  insights.push({
+    id: "headline",
+    severity: "info",
+    category: "session",
+    title: "Session overview",
+    detail: [
+      `${nTurns} turns`,
+      `${nTools} tools`,
+      wallSec != null ? fmtDur(wallSec * 1000) + " wall" : null,
+      toolWall > 0 ? fmtDur(toolWall) + " tool time" : null,
+      toolOk != null ? `${Math.round(toolOk * 100)}% tool success` : null,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    evidence: [],
+    suggestion: null,
+  });
+
+  // 2) Tool / shell-command time breakdown (one layer under tool name)
+  //    Aggregate by display key: "git", "cargo", … for shell; else tool_name
+  const familyStats = {};
+  for (const c of calls) {
+    const fam = shellCommandFamily(c);
+    const key = fam ? fam : c.tool_name || "unknown";
+    const bucket = (familyStats[key] ||= {
+      key,
+      tool_name: c.tool_name,
+      fam,
+      dur: 0,
+      n: 0,
+      fails: 0,
+      calls: [],
+    });
+    const d = Number(c.span?.duration_ms) || 0;
+    bucket.dur += d;
+    bucket.n += 1;
+    if (c.success === false || ["failure", "blocked", "error"].includes(c.status)) {
+      bucket.fails += 1;
+    }
+    bucket.calls.push(c);
+  }
+  const famRanks = Object.values(familyStats)
+    .filter((r) => r.dur > 0)
+    .sort((a, b) => b.dur - a.dur);
+
+  if (famRanks.length && toolWall > 0) {
+    const top = famRanks[0];
+    const share = top.dur / toolWall;
+    const label = top.fam
+      ? `shell → ${top.fam}`
+      : top.key;
+    // Always surface top time consumer at command/tool granularity
+    {
+      const bestCall = [...top.calls].sort(
+        (a, b) => (b.span?.duration_ms || 0) - (a.span?.duration_ms || 0)
+      )[0];
+      insights.push({
+        id: "tool_time_hog",
+        severity: share >= 0.35 ? "warn" : "info",
+        category: "efficiency",
+        title: `${label} used ${Math.round(share * 100)}% of tool wall time`,
+        detail: `${top.n} calls · ${fmtDur(top.dur)} total${
+          top.fails ? ` · ${top.fails} fail` : ""
+        }`,
+        evidence: bestCall
+          ? [{ type: "tool", id: bestCall.tool_call_id, label: label }]
+          : [],
+        suggestion:
+          share >= 0.35
+            ? top.fam
+              ? `Most agent tool time is shell \`${top.fam}\` — check those commands for hangs or redundant work.`
+              : `Most agent tool time is in ${top.key} — inspect those calls.`
+            : null,
+      });
+    }
+
+    // Shell command breakdown whenever there are multiple shell families
+    const shellOnly = famRanks.filter((r) => r.fam);
+    const shellWall = shellOnly.reduce((s, r) => s + r.dur, 0);
+    if (shellOnly.length >= 2 && shellWall > 0) {
+      const topF = shellOnly.slice(0, 6);
+      insights.push({
+        id: "shell_breakdown",
+        severity: "info",
+        category: "efficiency",
+        title: "Shell time by command",
+        detail: topF
+          .map((r) => {
+            const pct = Math.round((r.dur / shellWall) * 100);
+            return `${r.fam} ${pct}% (${r.n}×, ${fmtDur(r.dur)})`;
+          })
+          .join(" · "),
+        evidence: topF[0]?.calls?.length
+          ? [
+              {
+                type: "tool",
+                id: [...topF[0].calls].sort(
+                  (a, b) => (b.span?.duration_ms || 0) - (a.span?.duration_ms || 0)
+                )[0].tool_call_id,
+                label: topF[0].fam,
+              },
+            ]
+          : [],
+        suggestion: null,
+      });
+    }
+  }
+
+  // 3) Slowest calls — show command family for shell
+  let slowest = [...calls]
+    .filter((c) => (c.span?.duration_ms || 0) > 0)
+    .sort((a, b) => (b.span?.duration_ms || 0) - (a.span?.duration_ms || 0))
+    .slice(0, 3);
+  if (slowest.length) {
+    const lines = slowest
+      .map((c) => {
+        const fam = shellCommandFamily(c);
+        const label = fam ? `${fam}` : c.tool_name;
+        return `${label} ${fmtDur(c.span?.duration_ms)}${c.turn_id ? ` (${c.turn_id})` : ""}`;
+      })
+      .join(" · ");
+    insights.push({
+      id: "slowest_calls",
+      severity: "info",
+      category: "efficiency",
+      title: "Slowest tool calls",
+      detail: lines,
+      evidence: slowest[0]
+        ? [{ type: "tool", id: slowest[0].tool_call_id, label: slowest[0].tool_name }]
+        : [],
+      suggestion: null,
+    });
+  }
+
+  // 4) Tool failures — break shell failures down by command
+  const fails = calls.filter(
+    (c) => c.success === false || ["failure", "blocked", "error"].includes(c.status)
+  );
+  if (fails.length) {
+    const by = Counter(fails.map((c) => {
+      const fam = shellCommandFamily(c);
+      return fam ? `shell→${fam}` : c.tool_name;
+    }));
+    const topFail = Object.entries(by).sort((a, b) => b[1] - a[1])[0];
+    insights.push({
+      id: "tool_failures",
+      severity: fails.length >= 3 ? "alert" : "warn",
+      category: "reliability",
+      title: `${fails.length} tool failure${fails.length === 1 ? "" : "s"}`,
+      detail: Object.entries(by)
+        .map(([n, c]) => `${n}×${c}`)
+        .join(" · "),
+      evidence: [
+        {
+          type: "tool",
+          id: fails[0].tool_call_id,
+          label: toolDisplayKey(fails[0]),
+        },
+      ],
+      suggestion: topFail
+        ? `Inspect failed ${topFail[0]} on ${fails[0].turn_id || "timeline"}.`
+        : null,
+    });
+  }
+
+  // 5) Heavy turns (input tokens)
+  const withTok = turns
+    .map((t) => ({
+      id: t.turn_id,
+      inn: t.tokens?.input_tokens,
+      out: t.tokens?.output_tokens,
+      dur: t.span?.duration_ms,
+      nTools: (t.tool_call_ids || []).length,
+    }))
+    .filter((t) => t.inn != null);
+  withTok.sort((a, b) => b.inn - a.inn);
+  if (withTok.length) {
+    const top = withTok.slice(0, 3);
+    const maxIn = top[0].inn;
+    insights.push({
+      id: "heavy_turns",
+      severity: maxIn >= 100000 ? "warn" : "info",
+      category: "efficiency",
+      title: "Highest input-token turns",
+      detail: top
+        .map((t) => `${t.id}: ${t.inn.toLocaleString()} in`)
+        .join(" · "),
+      evidence: [{ type: "turn", id: top[0].id, label: top[0].id }],
+      suggestion: null,
+    });
+  }
+
+  // 6) Long turns
+  const byDur = [...turns]
+    .filter((t) => (t.span?.duration_ms || 0) > 0)
+    .sort((a, b) => (b.span?.duration_ms || 0) - (a.span?.duration_ms || 0));
+  if (byDur.length) {
+    const top = byDur.slice(0, 3);
+    const maxD = top[0].span.duration_ms;
+    insights.push({
+      id: "long_turns",
+      severity: maxD >= 120000 ? "warn" : "info",
+      category: "efficiency",
+      title: "Longest turns",
+      detail: top
+        .map(
+          (t) =>
+            `${t.turn_id}: ${fmtDur(t.span.duration_ms)} (${(t.tool_call_ids || []).length} tools)`
+        )
+        .join(" · "),
+      evidence: [{ type: "turn", id: top[0].turn_id, label: top[0].turn_id }],
+      suggestion: null,
+    });
+  }
+
+  // 7) TTFT spike
+  const ttfts = turns
+    .map((t) => ({ id: t.turn_id, ms: t.time_to_first_token_ms }))
+    .filter((t) => t.ms != null && t.ms > 0);
+  if (ttfts.length >= 2) {
+    const med = median(ttfts.map((t) => t.ms));
+    const worst = [...ttfts].sort((a, b) => b.ms - a.ms)[0];
+    if (med && worst.ms >= 5000 && worst.ms >= 2 * med) {
+      insights.push({
+        id: "ttft_spike",
+        severity: "warn",
+        category: "latency",
+        title: `Slow first token on ${worst.id}`,
+        detail: `TTFT ${fmtDur(worst.ms)} vs median ${fmtDur(med)}`,
+        evidence: [{ type: "turn", id: worst.id, label: worst.id }],
+        suggestion: null,
+      });
+    }
+  }
+
+  // 8) Compactions
+  if (comps.length >= 1) {
+    const before = comps.reduce((s, c) => s + (c.tokens_before || 0), 0);
+    const after = comps.reduce((s, c) => s + (c.tokens_after || 0), 0);
+    const biggest = [...comps].sort(
+      (a, b) => (b.tokens_before || 0) - (a.tokens_before || 0)
+    )[0];
+    insights.push({
+      id: "compactions",
+      severity: comps.length >= 3 ? "warn" : "info",
+      category: "context",
+      title: `${comps.length} context compaction${comps.length === 1 ? "" : "s"}`,
+      detail: `~${before.toLocaleString()} → ${after.toLocaleString()} tokens (sum before/after)${
+        biggest?.turn_id ? ` · largest near ${biggest.turn_id}` : ""
+      }`,
+      evidence: biggest
+        ? biggest.turn_id
+          ? [{ type: "turn", id: biggest.turn_id, label: biggest.turn_id }]
+          : [{ type: "compaction", id: String(biggest.tokens_before), label: "compaction" }]
+        : [],
+      suggestion:
+        comps.length >= 3
+          ? "Context was compacted repeatedly — shorter turns or less tool dump may help."
+          : null,
+    });
+  }
+
+  // 9) Unused skills
+  const inv = skills.inventory || [];
+  const acts = skills.activations || [];
+  const unused = skills.summary?.unused_skill_names || inv.filter((i) => !i.used).map((i) => i.skill_name);
+  if (inv.length >= 5 && acts.length === 0) {
+    const show = unused.slice(0, 5).join(", ");
+    const more = unused.length > 5 ? ` +${unused.length - 5} more` : "";
+    insights.push({
+      id: "unused_skills",
+      severity: "warn",
+      category: "harness",
+      title: `${inv.length} skills advertised, 0 activated`,
+      detail: show ? `${show}${more}` : "No skill activations recorded",
+      evidence: [],
+      suggestion:
+        "Many skills are injected but never activated — trimming inventory may cut prompt tokens.",
+    });
+  } else if (unused.length >= 5 && acts.length > 0) {
+    insights.push({
+      id: "unused_skills_partial",
+      severity: "info",
+      category: "harness",
+      title: `${unused.length} skills never activated`,
+      detail: unused.slice(0, 5).join(", ") + (unused.length > 5 ? ` +${unused.length - 5} more` : ""),
+      evidence: [],
+      suggestion: null,
+    });
+  } else if (acts.length > 0) {
+    const used = skills.summary?.skills_used || [...new Set(acts.map((a) => a.skill_name))];
+    insights.push({
+      id: "skills_used",
+      severity: "info",
+      category: "harness",
+      title: `${acts.length} skill activation${acts.length === 1 ? "" : "s"}`,
+      detail: used.join(", "),
+      evidence: [],
+      suggestion: null,
+    });
+  }
+
+  // 10) MCP down
+  const failedMcp = mcp.summary?.failed_servers || [];
+  if (failedMcp.length) {
+    insights.push({
+      id: "mcp_down",
+      severity: "warn",
+      category: "reliability",
+      title: "MCP servers failed to connect",
+      detail: failedMcp.join(", "),
+      evidence: [],
+      suggestion: `MCP servers failed to connect: ${failedMcp.join(", ")}.`,
+    });
+  }
+
+  // 11) Cancelled turns
+  const cancelled = turns.filter((t) => t.status === "cancelled" || t.outcome === "cancelled");
+  if (cancelled.length) {
+    insights.push({
+      id: "cancelled_turns",
+      severity: "info",
+      category: "friction",
+      title: `${cancelled.length} cancelled turn${cancelled.length === 1 ? "" : "s"}`,
+      detail: cancelled.map((t) => t.turn_id).join(", "),
+      evidence: [{ type: "turn", id: cancelled[0].turn_id, label: cancelled[0].turn_id }],
+      suggestion: `User cancelled ${cancelled[0].turn_id} — possible friction or long wait.`,
+    });
+  }
+
+  // Rank & cap: headline + prefer shell/tool efficiency cards, then severity
+  const headline = insights.filter((i) => i.id === "headline");
+  const PRIORITY_IDS = new Set([
+    "tool_time_hog",
+    "shell_breakdown",
+    "tool_failures",
+    "slowest_calls",
+  ]);
+  const rest = insights
+    .filter((i) => i.id !== "headline")
+    .sort((a, b) => {
+      const pa = PRIORITY_IDS.has(a.id) ? 0 : 1;
+      const pb = PRIORITY_IDS.has(b.id) ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      return (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9);
+    });
+  const picked = [];
+  const seenCat = new Set();
+  for (const ins of rest) {
+    if (picked.length >= 7) break;
+    if (PRIORITY_IDS.has(ins.id) || !seenCat.has(ins.category) || picked.length < 5) {
+      picked.push(ins);
+      seenCat.add(ins.category);
+    }
+  }
+  for (const ins of rest) {
+    if (picked.length >= 7) break;
+    if (!picked.includes(ins)) picked.push(ins);
+  }
+  const capped = [...headline, ...picked];
+
+  // Dedupe suggestions — max 3 across strip
+  let sugLeft = 3;
+  for (const i of capped) {
+    if (i.suggestion && sugLeft > 0) sugLeft -= 1;
+    else if (i.suggestion && sugLeft <= 0) i.suggestion = null;
+  }
+
+  return {
+    insights: capped,
+    metrics: {
+      tool_wall_time_ms: toolWall,
+      turn_wall_time_ms: turnWall,
+      tool_success_rate: toolOk,
+      n_turns: nTurns,
+      n_tools: nTools,
+    },
+  };
+}
+
+function Counter(arr) {
+  const o = {};
+  for (const x of arr) o[x] = (o[x] || 0) + 1;
+  return o;
+}
+
+function renderInsights(pkg) {
+  const strip = document.getElementById("insights-strip");
+  const cardsEl = document.getElementById("insights-cards");
+  const countEl = document.getElementById("insights-count");
+  if (!strip || !cardsEl) return;
+
+  const { insights } = buildInsights(pkg);
+  state.insights = insights;
+
+  if (!insights.length) {
+    strip.hidden = true;
+    return;
+  }
+  strip.hidden = false;
+  const warns = insights.filter((i) => i.severity === "warn" || i.severity === "alert").length;
+  countEl.textContent =
+    warns > 0 ? `${insights.length} · ${warns} need attention` : `${insights.length} signals`;
+
+  cardsEl.innerHTML = insights
+    .map((ins) => {
+      const clickable = (ins.evidence || []).length > 0;
+      return `<button type="button" class="insight-card ${ins.severity}${
+        clickable ? " clickable" : ""
+      }" data-insight="${escapeHtml(ins.id)}">
+        <div class="insight-sev">${escapeHtml(ins.severity)}</div>
+        <h3>${escapeHtml(ins.title)}</h3>
+        <p>${escapeHtml(ins.detail || "")}</p>
+        ${
+          ins.suggestion
+            ? `<div class="insight-suggest">${escapeHtml(ins.suggestion)}</div>`
+            : ""
+        }
+      </button>`;
+    })
+    .join("");
+
+  cardsEl.querySelectorAll(".insight-card.clickable").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.insight;
+      const ins = (state.insights || []).find((x) => x.id === id);
+      const ev = ins?.evidence?.[0];
+      if (!ev) return;
+      const eventId = timelineEventIdForEvidence(ev);
+      if (eventId) selectNode(eventId, { scroll: true });
+    });
+  });
+}
+
 function layoutMetrics() {
   const cs = getComputedStyle(document.documentElement);
   const gutter = parseFloat(cs.getPropertyValue("--gutter")) || 340;
@@ -969,6 +1682,15 @@ function wireChrome() {
     state.showBars = e.target.checked;
     document.body.classList.toggle("hide-bars", !state.showBars);
   };
+
+  const insightsToggle = document.getElementById("insights-toggle");
+  const insightsStrip = document.getElementById("insights-strip");
+  if (insightsToggle && insightsStrip) {
+    insightsToggle.onclick = () => {
+      const collapsed = insightsStrip.classList.toggle("collapsed");
+      insightsToggle.textContent = collapsed ? "Show" : "Hide";
+    };
+  }
   document.querySelectorAll(".detail-tabs .tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       document.querySelectorAll(".detail-tabs .tab").forEach((t) => t.classList.remove("on"));
@@ -1032,6 +1754,7 @@ async function main() {
     const pkg = await loadPackage();
     state.pkg = pkg;
     renderHeader(pkg);
+    renderInsights(pkg);
 
     const { byId, roots } = buildTree(pkg.timeline || []);
     state.byId = byId;
