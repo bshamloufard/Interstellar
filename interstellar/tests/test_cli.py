@@ -959,6 +959,31 @@ def _sample_size_blocked_stats_gate(summary, *, primary_effect=None, max_token_r
                        "any confidence"]}
 
 
+def _stats_summarize_with_efficiency_rows(grades, *, primary_effect, seed=0):
+    """A handful of real EFFICIENCY_METRICS names -- both cache-sensitive
+    (cost_usd, total_tokens) and not (skill_tokens_est) -- so an
+    integration test can check what a BUILT REPORT's per-metric entries
+    actually carry, the exact shape report.py's renderer reads, per the
+    reviewer's own point: the existing test passed by checking the
+    top-level dict, which the renderer never looks at."""
+    row = lambda c, t: {"lower_is_better": True, "n": len(grades),
+                        "control_median": c, "treatment_median": t,
+                        "abs_delta": c - t, "pct_delta": None,
+                        "bootstrap": {"mean": c - t, "lo": None, "hi": None,
+                                     "level": 0.95, "n": len(grades), "note": None}}
+    return {
+        "win_rate": {"wins": 0, "ties": len(grades), "losses": 0, "n": len(grades),
+                    "rate": None, "lo": None, "hi": None, "note": None},
+        "regressions": [],
+        "efficiency": {
+            "cost_usd": row(0.05, 0.03),
+            "total_tokens": row(1000, 800),
+            "skill_tokens_est": row(1458, 774),
+        },
+        "primary_metric": primary_effect,
+    }
+
+
 class ProgressJournalTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1037,6 +1062,24 @@ class ProgressJournalTests(unittest.TestCase):
         self.assertIn("DIRECTIONAL: FAVORABLE", printed)
         self.assertIn(f"--k {cli.stats.MIN_SAMPLES_FOR_CI}", printed)
         self.assertIn("directional-only", printed)
+
+    def test_per_metric_cache_sensitive_flag_reaches_the_built_report(self):
+        # final-review.md follow-up: cli.py set a top-level
+        # cache_sensitive_metrics dict but report.py's renderer reads
+        # `cache_sensitive` PER METRIC ENTRY inside
+        # statistics["efficiency"][name] -- the two never met. This checks
+        # the shape the renderer actually consumes, not just the top-level
+        # dict (which an earlier version of this test suite passed on
+        # despite the marker never rendering).
+        rpt = self._run(stats_summarize=_stats_summarize_with_efficiency_rows)
+        for pr in rpt["patch_results"]:
+            efficiency = pr["statistics"]["efficiency"]
+            self.assertTrue(efficiency["cost_usd"]["cache_sensitive"])
+            self.assertTrue(efficiency["total_tokens"]["cache_sensitive"])
+            self.assertFalse(efficiency["skill_tokens_est"]["cache_sensitive"])
+            # the underlying stats fields must survive the stamp untouched
+            self.assertEqual(efficiency["skill_tokens_est"]["control_median"], 1458)
+            self.assertEqual(efficiency["skill_tokens_est"]["treatment_median"], 774)
 
     def test_report_carries_cache_warmth_caveat_and_metric_flags(self):
         # Real observed cache_read_input_tokens swing, varying per call
