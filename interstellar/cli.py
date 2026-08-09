@@ -913,6 +913,10 @@ def _run_preflight(baseline_version, *, out_dir, auth_from, model, timeout, runn
     up on its own. Raises SystemExit with the failure verbatim -- never
     silently continues past a broken environment.
 
+    Returns the call's own `total_cost_usd` (a real, billed grok-dev call
+    -- final-review.md I1) so the caller can fold it into the cycle's
+    reported cost instead of it vanishing the way it used to.
+
     Uses a shallow copy of `baseline_version` with its own `warnings` list,
     not the real one: `harness.materialize` can append a warning in place
     (e.g. "project skill not materialized" when no `project_dest` is given,
@@ -979,6 +983,8 @@ def _run_preflight(baseline_version, *, out_dir, auth_from, model, timeout, runn
             "to skip this check."
         )
 
+    return out.get("total_cost_usd")
+
 
 # --------------------------------------------------------------------------
 # the orchestrator
@@ -1035,6 +1041,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
     cwd = _resolve_cwd(trace)
     project_dir = Path(cwd) if cwd and Path(cwd).is_dir() else None
     workspace = Path(cwd) if cwd else None
+    _check_workspace_out_collision(workspace, out_dir)
 
     baseline_version = harness.snapshot(baseline_home, project_dir=project_dir)
 
@@ -1136,14 +1143,18 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             "this machine -- cannot safely replay the original prompt"
         )
 
-    if not no_preflight:
-        _run_preflight(baseline_version, out_dir=out_dir, auth_from=real_grok_home,
-                       model=model, timeout=timeout, runner=runner)
-
-    patch_results = []
     total_cost = 0.0
     if not use_cached_analysis and analysis_meta.get("cost_usd"):
         total_cost += analysis_meta["cost_usd"]
+
+    if not no_preflight:
+        preflight_cost = _run_preflight(
+            baseline_version, out_dir=out_dir, auth_from=real_grok_home,
+            model=model, timeout=timeout, runner=runner)
+        if preflight_cost is not None:
+            total_cost += preflight_cost
+
+    patch_results = []
 
     print(f"=== running review cycle: {len(selected_patches)} patch(es) selected, "
           f"k={k} ===")

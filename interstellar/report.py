@@ -689,6 +689,14 @@ def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=Non
     Only past all four does the five-state truth table apply -- see the
     inline states below. Falls back to a legacy REJECT only for a gate
     dict that predates the provisional/directional fields entirely.
+
+    A `favorable`/`unfavorable` reading (PROVISIONAL or DIRECTIONAL state)
+    also gets `" (efficiency only, no decided quality pairs)"` appended
+    when `gate["quality_evidence"]` is present and not `"decided"` -- the
+    reading can come purely from the efficiency point estimate with zero
+    corroborating win/loss evidence, and that provenance belongs on the
+    badge itself, not only in the reasons list. Absent field (older gate
+    dicts) renders no suffix.
     """
     if not applied:
         return '<span class="badge not-run">NOT RUN</span>'
@@ -705,6 +713,19 @@ def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=Non
     reading_cls = {"favorable": "directional-favorable", "unfavorable": "directional-unfavorable"}.get(
         reading, "directional-neutral"
     )
+    # stats.gate()'s quality_evidence ("none" | "ties_only" | "decided"):
+    # a favorable/unfavorable reading can come purely from the efficiency
+    # point estimate with zero corroborating win/loss evidence (e.g. one
+    # judged pair, a tie) -- real evidence, not to be thrown away, but its
+    # provenance must be visible right on the badge, not just in the
+    # reasons list a reader may not scroll to. Absent (older gate dicts)
+    # renders no suffix at all -- not every gate has this field yet.
+    quality_evidence = gate.get("quality_evidence")
+    reading_suffix = (
+        " (efficiency only, no decided quality pairs)"
+        if reading in ("favorable", "unfavorable") and quality_evidence not in (None, "decided")
+        else ""
+    )
 
     wr = win_rate or {}
     zero_quality_evidence = (wr.get("wins", 0) + wr.get("losses", 0)) == 0 and wr.get("ties", 0) > 0
@@ -716,12 +737,12 @@ def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=Non
     if accepted:
         return '<span class="badge accept">ACCEPTED</span>'
     if provisional:
-        return f'<span class="badge {reading_cls}">PROVISIONAL &middot; {_esc(reading.upper())}</span>'
+        return f'<span class="badge {reading_cls}">PROVISIONAL &middot; {_esc(reading.upper())}{_esc(reading_suffix)}</span>'
     if has_directional:
         reasons = gate.get("reasons") or []
         too_few_for_any_call = any("insufficient_samples_for_acceptance" in r for r in reasons)
         if too_few_for_any_call:
-            return f'<span class="badge {reading_cls}">DIRECTIONAL &middot; {_esc(reading.upper())}</span>'
+            return f'<span class="badge {reading_cls}">DIRECTIONAL &middot; {_esc(reading.upper())}{_esc(reading_suffix)}</span>'
         return '<span class="badge reject">REJECTED</span>'
     return '<span class="badge reject">REJECT</span>'
 
