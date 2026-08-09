@@ -1153,7 +1153,18 @@ impl SessionActor {
         plugin_source: Option<String>,
         trigger: crate::session::events::SkillTrigger,
         related_tool_call_id: Option<String>,
+        skill_path: Option<&str>,
     ) {
+        // Measure the body that is about to enter context. Best-effort: a
+        // missing or unreadable file records None rather than a wrong 0, so
+        // consumers can tell "not measured" from "empty".
+        let (skill_bytes, skill_lines) = match skill_path.map(std::fs::read_to_string) {
+            Some(Ok(body)) => (
+                Some(body.len() as u64),
+                Some(u32::try_from(body.lines().count()).unwrap_or(u32::MAX)),
+            ),
+            _ => (None, None),
+        };
         let telemetry_trigger = match trigger {
             crate::session::events::SkillTrigger::SlashCommand => {
                 xai_grok_telemetry::events::SkillTrigger::SlashCommand
@@ -1175,6 +1186,8 @@ impl SessionActor {
             trigger,
             plugin_source,
             related_tool_call_id,
+            skill_bytes,
+            skill_lines,
         });
         self.signals_handle().record_skill_activation(skill_name);
     }

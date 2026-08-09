@@ -425,6 +425,7 @@ impl SessionActor {
                         sk.plugin_name.clone(),
                         crate::session::events::SkillTrigger::SlashCommand,
                         None,
+                        Some(sk.skill_path.as_str()),
                     );
                     let skill_source = if sk.plugin_name.is_some() {
                         "plugin"

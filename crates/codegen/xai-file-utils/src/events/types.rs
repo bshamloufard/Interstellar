@@ -478,6 +478,16 @@ pub enum Event {
         /// with `tool_completed` / `updates.jsonl`.
         #[serde(skip_serializing_if = "Option::is_none")]
         related_tool_call_id: Option<String>,
+        /// Size of the SKILL.md body injected into context, in bytes. This is
+        /// the activation's context cost, and the only way to price a
+        /// `slash_command` activation — that trigger has no backing tool call,
+        /// so there is no `tool_completed` row to join against for a size.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skill_bytes: Option<u64>,
+        /// Line count of the same body, so post-session analysis can cite line
+        /// ranges without re-reading the file (which may have changed since).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skill_lines: Option<u32>,
     },
 }
 
@@ -940,6 +950,8 @@ mod tests {
             trigger: SkillTrigger::SlashCommand,
             plugin_source: None,
             related_tool_call_id: None,
+            skill_bytes: None,
+            skill_lines: None,
         })
         .unwrap();
         assert_eq!(local["type"], "skill_activated");
@@ -947,17 +959,45 @@ mod tests {
         assert_eq!(local["trigger"], "slash_command");
         assert!(local.get("plugin_source").is_none());
         assert!(local.get("related_tool_call_id").is_none());
+        // Unmeasured must be absent, not 0 — consumers distinguish "not
+        // measured" from "empty file".
+        assert!(local.get("skill_bytes").is_none());
+        assert!(local.get("skill_lines").is_none());
 
         let tool_backed = serde_json::to_value(Event::SkillActivated {
             skill_name: "create-skill".into(),
             trigger: SkillTrigger::SkillMdRead,
             plugin_source: Some("marketplace".into()),
             related_tool_call_id: Some("call_abc".into()),
+            skill_bytes: Some(5832),
+            skill_lines: Some(123),
         })
         .unwrap();
         assert_eq!(tool_backed["trigger"], "skill_md_read");
         assert_eq!(tool_backed["plugin_source"], "marketplace");
         assert_eq!(tool_backed["related_tool_call_id"], "call_abc");
+        assert_eq!(tool_backed["skill_bytes"], 5832);
+        assert_eq!(tool_backed["skill_lines"], 123);
+    }
+
+    /// A `slash_command` activation has no backing tool call, so `skill_bytes`
+    /// is the only record of what it cost the context. Guard that it survives
+    /// serialization on exactly that path.
+    #[test]
+    fn slash_command_activation_carries_context_cost() {
+        let ev = serde_json::to_value(Event::SkillActivated {
+            skill_name: "strict-audit".into(),
+            trigger: SkillTrigger::SlashCommand,
+            plugin_source: None,
+            related_tool_call_id: None,
+            skill_bytes: Some(5832),
+            skill_lines: Some(123),
+        })
+        .unwrap();
+        assert_eq!(ev["trigger"], "slash_command");
+        assert!(ev.get("related_tool_call_id").is_none());
+        assert_eq!(ev["skill_bytes"], 5832);
+        assert_eq!(ev["skill_lines"], 123);
     }
 
     #[test]

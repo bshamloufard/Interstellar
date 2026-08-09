@@ -129,6 +129,8 @@ mod tests {
             trigger: SkillTrigger::SlashCommand,
             plugin_source: None,
             related_tool_call_id: None,
+            skill_bytes: Some(1024),
+            skill_lines: Some(40),
         });
         writer.emit(Event::TurnEnded {
             outcome: TurnOutcomeLabel::Completed,

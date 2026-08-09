@@ -262,6 +262,7 @@ impl SessionActor {
                 sk.plugin_name.clone(),
                 crate::session::events::SkillTrigger::SlashCommand,
                 None,
+                Some(sk.skill_path.as_str()),
             );
         }
         slash_commands::build_skill_information_for_refs(

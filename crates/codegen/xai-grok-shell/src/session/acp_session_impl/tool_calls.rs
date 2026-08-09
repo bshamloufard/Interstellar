@@ -1805,6 +1805,9 @@ impl SessionActor {
                     None,
                     crate::session::events::SkillTrigger::SkillTool,
                     Some(tool_call_id.to_string()),
+                    // The Skill tool input carries only a name; the body size is
+                    // recoverable by joining `related_tool_call_id`.
+                    None,
                 );
                 (
                     format!("Skill: {}", skill.skill),
@@ -2042,11 +2045,13 @@ impl SessionActor {
             skill_source = skill_source,
         )
         .in_scope(|| {});
+        let skill_path = skill.path.clone();
         self.record_skill_activation(
             skill.name,
             skill.plugin_name,
             crate::session::events::SkillTrigger::SkillMdRead,
             related_tool_call_id,
+            Some(skill_path.as_str()),
         );
     }
     async fn handle_tool_parse_error(
