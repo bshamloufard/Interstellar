@@ -59,13 +59,37 @@ silently:
   * Before spending a cycle, one cheap grok-dev call runs through the
     baseline home (`_run_preflight`, skipped by `--dry-run` or
     `--no-preflight`) so an auth/environment failure is caught once instead
-    of being rediscovered by every one of `2 * k` runs per patch. Within a
-    patch, the first control/treatment pair always runs alone; if BOTH
-    arms fail on it, the remaining `k - 1` repeats are skipped rather than
-    re-discovering the same failure repeatedly, and the report says so. If
-    every run across the whole cycle fails, `run_review` raises
-    `SystemExit` after writing the report -- a cycle that produced no
+    of being rediscovered by every one of `2 * k` runs per patch. Its own
+    real cost is folded into the reported total, same as every other real
+    spend. Within a patch, the first control/treatment pair always runs
+    alone; if BOTH arms fail on it, the remaining `k - 1` repeats are
+    skipped rather than re-discovering the same failure repeatedly, and the
+    report says so. If every run across the whole cycle fails, `run_review`
+    raises `SystemExit` after writing the report -- a cycle that produced no
     usable data is not a success, and exiting 0 would say otherwise.
+  * The reported cycle cost includes replay runs, the live analyzer call,
+    and the preflight check -- it does NOT include judge (LLM-as-judge
+    grading) calls, which `grade.py`'s own default judge implementation
+    does not surface a cost for; the report says so explicitly
+    (`JUDGE_COST_CAVEAT`) rather than presenting a figure that silently
+    under-counts as if it were complete.
+  * `_check_workspace_out_collision` refuses at plan time, before the
+    preflight call, when `--out` and the trace's recorded workspace nest
+    inside each other -- `replay.isolated_workdir` copies the workspace
+    into a directory under `--out`'s own scratch tree, and if `--out` (the
+    documented default, `runs/<timestamp>`, is itself relative) lands
+    inside that same workspace, the copy recurses into its own
+    destination and every run fails, which would otherwise be
+    misdiagnosed by the preflight/all-failed paths as an auth problem
+    rather than the path bug it is.
+  * A recommendation that gets ranked out, rejected before ranking (a lint
+    hit, an invalid line range, ...), or names a type this build's
+    `patches.py` doesn't recognize is never silently discarded: every one
+    becomes a `skipped_reason`-carrying Patch, and `_rank_and_select`'s
+    `dropped` list is passed straight through to
+    `report.build(dropped_patches=...)` (report.py's own purpose-built,
+    non-truncating surface for exactly this) so it reaches the report
+    itself, not only `progress.json`.
 
     python3 -m unittest discover interstellar/tests
 """
@@ -678,16 +702,49 @@ def _session_info(trace, prompt, trace_path):
 # Which of the ten EFFICIENCY_METRICS (types.py) are driven by grok's own
 # token/cost accounting -- and therefore carry prompt-cache-warmth noise --
 # versus counted straight off the trace/harness, independent of cache
-# state. Only the metrics explicitly classified (7 of 10) appear here;
-# `wall_ms`, `tool_result_tokens_est`, and `mcp_startup_ms` are
-# deliberately left out rather than guessed at -- report.py's renderer
-# should treat a metric with no entry as unclassified, not as "confirmed
-# not cache-sensitive".
+# state. All ten are classified; the evidence behind each entry is not
+# uniform, so it is recorded here rather than left implicit:
+#
+#   empirically verified (measured, not just reasoned about) --
+#     cost_usd:  True.  corr(cache_read_input_tokens, cost_usd) = -0.744,
+#                n=50 across this session's real cycles -- strong and
+#                correctly signed (more cache reads -> lower cost).
+#     wall_ms:   False. corr(cache_read_input_tokens, wall_s) = +0.201,
+#                n=50 -- weak AND the wrong sign for "cache hit = faster".
+#                Wall time here is dominated by tool execution, MCP
+#                startup, and process spawn, not prompt-prefill compute;
+#                it is noisy for THOSE reasons, not this one, so marking
+#                it cache-sensitive would blame the wrong cause.
+#
+#   classified by construction (no correlation run, but the mechanism
+#   makes the answer structural, not a guess) --
+#     total_tokens:              True.  Literally sums cache_read_input_
+#                                tokens as one of its components, by
+#                                definition, not by correlation.
+#     tool_result_tokens_est:    False. A byte count of what tools
+#                                actually returned, computed by the
+#                                normalizer from the session store --
+#                                prompt caching cannot touch it.
+#     mcp_startup_ms:            False. Local process spawn time for MCP
+#                                servers; nothing to do with prompt
+#                                prefill.
+#     skill_tokens_est/skill_wasted_tokens_est/tool_calls/turns/
+#     duplicate_calls:           False. Counted straight off the trace/
+#                                harness (skill file sizes, call counts),
+#                                never derived from token accounting.
+#
+# Every metric has an entry -- unlike an earlier version of this dict,
+# nothing is left absent for report.py's renderer to treat as
+# "unclassified"; that distinction is still worth keeping for anything
+# added to EFFICIENCY_METRICS later, just not for these ten.
 CACHE_SENSITIVE_METRICS = {
     "total_tokens": True,
     "cost_usd": True,
+    "wall_ms": False,
     "skill_tokens_est": False,
     "skill_wasted_tokens_est": False,
+    "tool_result_tokens_est": False,
+    "mcp_startup_ms": False,
     "tool_calls": False,
     "turns": False,
     "duplicate_calls": False,

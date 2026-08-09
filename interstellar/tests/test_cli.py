@@ -20,6 +20,7 @@ from unittest import mock
 
 from interstellar import cli
 from interstellar.types import (
+    EFFICIENCY_METRICS,
     PATCH_MCP_REMOVE,
     PATCH_RULES_APPEND,
     PATCH_SKILL_INSERT,
@@ -472,16 +473,27 @@ class CacheWarmthCaveatTests(unittest.TestCase):
 
 
 class CacheSensitiveMetricsTests(unittest.TestCase):
-    def test_classifies_exactly_the_named_metrics(self):
-        self.assertTrue(cli.CACHE_SENSITIVE_METRICS["total_tokens"])
+    def test_classifies_every_efficiency_metric(self):
+        # Full coverage now (team ruling, backed by real correlation data
+        # for cost_usd/wall_ms): no metric should read as "unclassified"
+        # by simple absence anymore.
+        for name, _lower_is_better in EFFICIENCY_METRICS:
+            self.assertIn(name, cli.CACHE_SENSITIVE_METRICS, f"{name} has no entry")
+
+    def test_empirically_verified_entries(self):
+        # corr(cache_read_input_tokens, cost_usd) = -0.744, n=50: strong,
+        # correctly signed -> True.
         self.assertTrue(cli.CACHE_SENSITIVE_METRICS["cost_usd"])
+        # corr(cache_read_input_tokens, wall_s) = +0.201, n=50: weak and
+        # the wrong sign -> False, despite the plausible-sounding intuition.
+        self.assertFalse(cli.CACHE_SENSITIVE_METRICS["wall_ms"])
+
+    def test_classified_by_construction_entries(self):
+        self.assertTrue(cli.CACHE_SENSITIVE_METRICS["total_tokens"])
         for name in ("skill_tokens_est", "skill_wasted_tokens_est",
+                    "tool_result_tokens_est", "mcp_startup_ms",
                     "tool_calls", "turns", "duplicate_calls"):
             self.assertFalse(cli.CACHE_SENSITIVE_METRICS[name])
-
-    def test_leaves_unclassified_metrics_out_rather_than_guessing(self):
-        for name in ("wall_ms", "tool_result_tokens_est", "mcp_startup_ms"):
-            self.assertNotIn(name, cli.CACHE_SENSITIVE_METRICS)
 
 
 def _patch_for_verdict(kind="skill.truncate", target="strict-audit"):
