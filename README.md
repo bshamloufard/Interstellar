@@ -8,6 +8,8 @@ Run `/interstellar` to automatically analyze your session, recommend better tool
 
 **One command to make your next session better.**
 
+![Session analysis visualizer](docs/images/session-visualizer.jpg)
+
 ---
 
 ## Setup
