@@ -137,13 +137,35 @@ def analyze(dig, *, model=None, timeout=600):
         out = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return None, {"error": "unparseable", "stdout": proc.stdout[-500:],
-                      "stderr": proc.stderr[-500:]}
+                      "stderr": proc.stderr[-500:], "source": "stdout"}
+
+    meta = {"cost_usd": out.get("total_cost_usd"), "usage": out.get("usage")}
+
+    # Prefer the schema-validated `structuredOutput` the CLI attaches at top
+    # level over the `text` message buffer. `text` happens to carry the same
+    # JSON on today's backend, but that is not the contract for
+    # --json-schema calls -- a different backend can deliver the schema
+    # result only via a synthetic tool call, leaving `text` empty or prose.
+    # `structuredOutputError` non-null means the call failed even if `text`
+    # looks parseable. `text` is used only when `structuredOutput` is absent
+    # from the response entirely.
+    struct_error = out.get("structuredOutputError")
+    if struct_error:
+        return None, {**meta, "error": "structuredOutputError",
+                      "structuredOutputError": struct_error, "source": "structuredOutput"}
+    if "structuredOutput" in out:
+        structured = out["structuredOutput"]
+        if structured is not None:
+            return structured, {**meta, "source": "structuredOutput"}
+        return None, {**meta, "error": "structuredOutput is null with no structuredOutputError",
+                      "source": "structuredOutput"}
+
     text = out.get("text") or ""
     try:
-        return json.loads(text), {"cost_usd": out.get("total_cost_usd"),
-                                  "usage": out.get("usage")}
+        return json.loads(text), {**meta, "source": "text_fallback"}
     except json.JSONDecodeError:
-        return None, {"error": "model output not JSON", "text": text[:500]}
+        return None, {**meta, "error": "model output not JSON", "text": text[:500],
+                      "source": "text_fallback"}
 
 
 def main():

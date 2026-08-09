@@ -11,19 +11,31 @@ the user's real ~/.grok; callers own choosing `dest` for materialize().
 
 GROK_HOME does not fully isolate the skill/MCP catalog: grok also discovers
 skills from `<grok_home>/bundled/skills/` (ships with the binary), from
-`~/.agents/skills/` (not disableable), and, unless disabled, from Claude- and
-Cursor-sourced skills/MCP servers under `~/.claude*` and `~/.cursor`.
-`materialize()` seals the second kind (compat.claude/compat.cursor) by
-appending disable tables to config.toml. `bundled/skills/` and
-`~/.agents/skills/` are not sealable -- they are a constant across both arms
-of a paired comparison, so `snapshot()` only surfaces them as a warning via
+`~/.agents/skills/` (not disableable), from the equivalent project-scoped
+roots (`<project>/.grok/skills/`, `<project>/.agents/skills/`), and, unless
+disabled, from Claude- and Cursor-sourced skills/MCP servers under
+`~/.claude*` and `~/.cursor`. `materialize()` seals the last kind
+(compat.claude/compat.cursor) by forcing all six cells of both tables to
+`false` in config.toml -- appending fresh tables when absent, rewriting in
+place when the version's own config already has one, so a user's existing
+`[compat.claude]` table can never leave a surface un-sealed while the
+recorded warning claims otherwise. The other roots are not sealable, so
+`snapshot()` only surfaces a same-name collision as a warning via
 `uncontrolled_skills()` rather than trying to hide them.
+
+Project-scope skills (`scope == "project"`, read from `<project>/.grok/
+skills/`) need to be materialized into `<project_dest>/.grok/skills/`, not
+`<dest>/skills/`: grok's own precedence is `./.grok/skills/` >
+`<repo>/.grok/skills/` > `$GROK_HOME/skills/`, so a project skill written
+into the GROK_HOME tier is silently shadowed by the original, unpatched copy
+still sitting in the replay workdir. See `materialize(..., project_dest=)`.
 """
 
 from __future__ import annotations
 
 import difflib
 import hashlib
+import os
 import re
 import shutil
 import tomllib
@@ -45,36 +57,26 @@ from interstellar.types import (
 # "[[marketplace.sources]]". Anchored so we don't match text mid-line.
 _TOML_HEADER_RE = re.compile(r"^\s*\[\[?([^\[\]]+)\]\]?\s*$")
 
-# Skill roots grok discovers that GROK_HOME does not control. "bundled/skills"
-# is relative to the grok home (it ships with the binary); "~/.agents/skills"
-# is always the real user home, independent of GROK_HOME. Neither is
-# disableable, so a `skill.remove` patch targeting a name that also lives here
-# is a no-op we must disclose, not a bug to fix -- see module docstring.
+# Skill roots grok discovers that GROK_HOME does not control, checked against
+# the grok home. "bundled/skills" is relative to the grok home -- verified
+# empirically (not just from docs): grok auto-creates and populates
+# `<home>/bundled/skills/` with 23 skills on first run against a *fresh*,
+# otherwise-empty home, so the root ships with the binary but is resolved
+# per-GROK_HOME, not globally. "~/.agents/skills" is always the real user
+# home, independent of GROK_HOME. Neither is disableable, so a `skill.remove`
+# patch targeting a name that also lives here is a no-op we must disclose,
+# not a bug to fix -- see module docstring.
 UNCONTROLLED_SKILL_ROOTS = ("bundled/skills", "~/.agents/skills")
 
-# Appended (never prepended) to a materialized config.toml so grok stops
-# discovering skills/rules/agents/mcp servers/hooks/sessions sourced from a
-# Claude or Cursor install on the same machine. Appending, not prepending,
-# means a `mcp.remove` patch's table-header text surgery -- which runs on the
-# version's config_text before this is added -- can never land inside these
-# tables.
-_SEAL_CONFIG_TEXT = """
-[compat.claude]
-skills = false
-rules = false
-agents = false
-mcps = false
-hooks = false
-sessions = false
+# Project-relative counterparts, checked separately against `project_dir`
+# since they aren't expressible as a single grok-home-relative label.
+UNCONTROLLED_PROJECT_SKILL_ROOTS = ("project/.grok/skills", "project/.agents/skills")
 
-[compat.cursor]
-skills = false
-rules = false
-agents = false
-mcps = false
-hooks = false
-sessions = false
-"""
+# The six on/off surfaces every [compat.<vendor>] table exposes, each
+# defaulting to true (enabled) when omitted -- confirmed against
+# ~/.grok/docs/user-guide/05-configuration.md.
+_COMPAT_CELLS = ("skills", "rules", "agents", "mcps", "hooks", "sessions")
+_COMPAT_VENDORS = ("claude", "cursor")
 
 
 # --- hashing -----------------------------------------------------------------
@@ -83,11 +85,18 @@ def _sha256_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _compute_version_id(skills, config_text):
-    """sha256 over sorted (name, sha256) skill pairs + config sha, first 12 hex.
+def _compute_version_id(skills, config_text, extra_rules=()):
+    """sha256 over sorted (name, sha256) skill pairs + config sha + extra_rules,
+    first 12 hex.
 
-    Sorting makes this independent of iteration/directory order, so two
-    identical harnesses always produce the same id.
+    Sorting the skill pairs makes this independent of iteration/directory
+    order, so two identical harnesses always produce the same id. extra_rules
+    are hashed in list order (not sorted) since they're appended at run time
+    via `--rules` and their order can matter to the model. types.py's
+    `make_harness_version` docstring states these are part of the harness
+    identity ("so they feed version_id") -- without this, a `rules.append`
+    patch produces a treatment version_id identical to its control's, per
+    review-harness-replay.md Important 5.
     """
     h = hashlib.sha256()
     for name, sha in sorted((s["name"], s["sha256"] or "") for s in skills):
@@ -96,6 +105,9 @@ def _compute_version_id(skills, config_text):
         h.update(sha.encode("utf-8"))
         h.update(b"\x00")
     h.update(_sha256_text(config_text).encode("utf-8"))
+    for rule in extra_rules:
+        h.update(b"\x00")
+        h.update(rule.encode("utf-8"))
     return h.hexdigest()[:12]
 
 
@@ -128,28 +140,51 @@ def _uncontrolled_root(home, label):
     return Path(home) / label
 
 
-def uncontrolled_skills(home) -> list[dict]:
-    """Skills grok's catalog includes that GROK_HOME does not govern.
+def _uncontrolled_project_root(project_dir, label):
+    if label == "project/.grok/skills":
+        return Path(project_dir) / ".grok" / "skills"
+    return Path(project_dir) / ".agents" / "skills"
 
-    Returns `{name, root}` for every skill found under `UNCONTROLLED_SKILL_ROOTS`.
-    Consumed by the report to render a caveat; does not affect `apply()`.
+
+def _skills_under(root):
+    if not root.is_dir():
+        return []
+    return [entry.name for entry in sorted(root.iterdir())
+            if (entry / "SKILL.md").is_file()]
+
+
+def uncontrolled_skills(home, project_dir=None) -> list[dict]:
+    """Skills grok's catalog includes that this harness does not govern.
+
+    Returns `{name, root}` for every skill found under
+    `UNCONTROLLED_SKILL_ROOTS`, plus -- when `project_dir` is given --
+    `UNCONTROLLED_PROJECT_SKILL_ROOTS`. Consumed by the report to render a
+    caveat; does not affect `apply()`.
     """
     out = []
     for label in UNCONTROLLED_SKILL_ROOTS:
         root = _uncontrolled_root(home, label)
-        if not root.is_dir():
-            continue
-        for entry in sorted(root.iterdir()):
-            if (entry / "SKILL.md").is_file():
-                out.append({"name": entry.name, "root": label})
+        out.extend({"name": n, "root": label} for n in _skills_under(root))
+    if project_dir is not None:
+        for label in UNCONTROLLED_PROJECT_SKILL_ROOTS:
+            root = _uncontrolled_project_root(project_dir, label)
+            out.extend({"name": n, "root": label} for n in _skills_under(root))
     return out
 
 
-def _uncontrolled_warnings(skills, home):
+def _uncontrolled_warnings(skills, home, project_dir=None):
     names = {s["name"] for s in skills}
+    # A controlled scope="project" skill is *sourced from* exactly
+    # project/.grok/skills -- that's its origin, not a shadow, and
+    # materialize(..., project_dest=) routes it back to that same tier. Only
+    # flag project/.grok/skills entries this version did NOT already capture,
+    # e.g. a skill added to the project after this snapshot was taken.
+    project_names = {s["name"] for s in skills if s["scope"] == "project"}
     seen = set()
     out = []
-    for u in uncontrolled_skills(home):
+    for u in uncontrolled_skills(home, project_dir=project_dir):
+        if u["root"] == "project/.grok/skills" and u["name"] in project_names:
+            continue
         key = (u["name"], u["root"])
         if u["name"] in names and key not in seen:
             seen.add(key)
@@ -163,7 +198,7 @@ def _uncontrolled_warnings(skills, home):
 
 # --- snapshot ------------------------------------------------------------
 
-def _read_skills(skills_dir, scope):
+def _read_skills(skills_dir, scope, warnings):
     out = []
     if not skills_dir.is_dir():
         return out
@@ -173,7 +208,11 @@ def _read_skills(skills_dir, scope):
             continue
         try:
             content = skill_md.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError) as exc:
+            # Recorded, not swallowed: a dropped skill changes version_id and
+            # the materialized home as though it were never installed, so its
+            # absence must be visible to whoever reads this version.
+            warnings.append(f"could not read skill '{entry.name}' at {skill_md}: {exc}")
             continue
         skill = make_skill(
             entry.name,
@@ -194,7 +233,7 @@ def _read_mcp_servers(config_path, warnings):
         return [], ""
     try:
         config_text = config_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         warnings.append(f"could not read config.toml: {exc}")
         return [], ""
     try:
@@ -220,13 +259,15 @@ def snapshot(grok_home: Path, project_dir: Path | None = None):
     grok_home = Path(grok_home)
     warnings = []
 
-    skills = _read_skills(grok_home / "skills", scope="user")
+    skills = _read_skills(grok_home / "skills", scope="user", warnings=warnings)
     if project_dir is not None:
-        skills += _read_skills(Path(project_dir) / ".grok" / "skills", scope="project")
+        skills += _read_skills(
+            Path(project_dir) / ".grok" / "skills", scope="project", warnings=warnings,
+        )
 
     mcp_servers, config_text = _read_mcp_servers(grok_home / "config.toml", warnings)
 
-    warnings.extend(_uncontrolled_warnings(skills, grok_home))
+    warnings.extend(_uncontrolled_warnings(skills, grok_home, project_dir=project_dir))
 
     return make_harness_version(
         version_id=_compute_version_id(skills, config_text),
@@ -240,56 +281,155 @@ def snapshot(grok_home: Path, project_dir: Path | None = None):
 
 # --- materialize -----------------------------------------------------------
 
-_SEAL_WARNING = (
-    "sealed materialized home: appended [compat.claude]/[compat.cursor] "
-    "disable tables so Claude/Cursor-sourced skills and MCP servers can't "
-    "leak into the isolated run"
-)
-
-
-def _is_sealed(config_text):
-    for line in config_text.splitlines():
+def _find_table_block(lines, table_name):
+    """Locate a top-level `[table_name]` table's line span: (start, end),
+    `end` exclusive, spanning from its header through to (not including) the
+    next header line. Returns None if no such table exists. Only matches the
+    table by exact name -- a subtable like `[table_name.sub]` ends the block,
+    it is not swept into it (compat tables are flat, no subtables per docs).
+    """
+    start = None
+    end = None
+    for i, line in enumerate(lines):
         m = _TOML_HEADER_RE.match(line)
-        if m and m.group(1).strip() in ("compat.claude", "compat.cursor"):
-            return True
-    return False
+        if not m:
+            continue
+        header = m.group(1).strip()
+        if start is not None:
+            end = i
+            break
+        if header == table_name:
+            start = i
+    if start is None:
+        return None
+    return start, (end if end is not None else len(lines))
+
+
+_COMPAT_CELL_RE = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=\s*(true|false)\s*(#.*)?$")
+
+
+def _existing_compat_cells(lines, start, end):
+    """Cell -> bool for every recognized `cell = true|false` line in a
+    [compat.<vendor>] block's body (lines[start+1:end])."""
+    cells = {}
+    for line in lines[start + 1:end]:
+        m = _COMPAT_CELL_RE.match(line)
+        if m and m.group(1) in _COMPAT_CELLS:
+            cells[m.group(1)] = m.group(2) == "true"
+    return cells
+
+
+def _compat_table_text(vendor):
+    body = "".join(f"{cell} = false\n" for cell in _COMPAT_CELLS)
+    return f"[compat.{vendor}]\n{body}\n"
 
 
 def _seal_config_text(config_text):
-    if _is_sealed(config_text):
-        return config_text
-    sep = "" if (not config_text or config_text.endswith("\n")) else "\n"
-    return config_text + sep + _SEAL_CONFIG_TEXT.lstrip("\n")
+    """Force every cell of [compat.claude] and [compat.cursor] to `false`.
+
+    Rewrites an existing table's cells in place (never appends a second
+    header for a table that already exists -- that's a TOML duplicate-table
+    parse error) and appends a fresh table when one is absent. Returns
+    `(new_config_text, notes)`; `notes` describes exactly what happened to
+    each vendor's table so the caller can record an accurate warning instead
+    of a blanket "sealed" claim that may not be true for every cell.
+    """
+    lines = config_text.splitlines(keepends=True)
+    notes = []
+    for vendor in _COMPAT_VENDORS:
+        table_name = f"compat.{vendor}"
+        block = _find_table_block(lines, table_name)
+        if block is None:
+            if lines and lines[-1].strip():
+                lines.append("\n")
+            lines.extend(_compat_table_text(vendor).splitlines(keepends=True))
+            notes.append(f"[compat.{vendor}] added (was absent, defaults to enabled)")
+            continue
+        start, end = block
+        existing = _existing_compat_cells(lines, start, end)
+        # Cells default to enabled (true) when the table exists but omits
+        # them -- see _COMPAT_CELLS comment -- so an absent cell still counts
+        # as an override once we force it to false.
+        overridden = [c for c in _COMPAT_CELLS if existing.get(c, True) is not False]
+        lines[start:end] = _compat_table_text(vendor).splitlines(keepends=True)
+        if overridden:
+            notes.append(
+                f"[compat.{vendor}] existing table rewritten, cells forced "
+                f"false that were not already false: {', '.join(overridden)}"
+            )
+        else:
+            notes.append(f"[compat.{vendor}] already fully sealed")
+    return "".join(lines), notes
 
 
-def materialize(version, dest: Path, *, auth_from: Path, seal: bool = True) -> Path:
+def materialize(version, dest: Path, *, auth_from: Path, seal: bool = True,
+                 project_dest: Path | None = None) -> Path:
     """Write `version` out as a runnable GROK_HOME at `dest`.
 
     Idempotent: skills/ and config.toml are replaced wholesale so a stale
     skill from a previous materialize never survives.
 
-    `seal=True` (default) appends `[compat.claude]`/`[compat.cursor]` disable
-    tables to the written config.toml, since GROK_HOME alone does not stop
+    `seal=True` (default) forces `[compat.claude]`/`[compat.cursor]` to fully
+    disabled in the written config.toml, since GROK_HOME alone does not stop
     grok from also discovering Claude/Cursor-sourced skills and MCP servers
-    on the same machine (see module docstring). Pass `seal=False` to opt out.
+    on the same machine (see module docstring). This always actually seals --
+    an existing table is rewritten, not skipped -- and the warning recorded
+    on `version["warnings"]` names exactly what was changed. Pass
+    `seal=False` to opt out.
+
+    `scope == "project"` skills are written to `<project_dest>/.grok/skills/`
+    when `project_dest` is given (grok's own precedence puts that root above
+    `$GROK_HOME/skills/`, so a project skill written only into `dest` would
+    be shadowed by the original file still in the replay workdir). Without
+    `project_dest`, project-scope skills are not written anywhere and a
+    warning names them -- never written into the GROK_HOME tier where the
+    caller would believe, wrongly, that they took effect.
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
+
+    user_skills = [s for s in version["skills"] if s["scope"] != "project"]
+    project_skills = [s for s in version["skills"] if s["scope"] == "project"]
 
     skills_dir = dest / "skills"
     if skills_dir.exists():
         shutil.rmtree(skills_dir)
     skills_dir.mkdir(parents=True)
-    for skill in version["skills"]:
+    for skill in user_skills:
         skill_dir = skills_dir / skill["name"]
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(skill["content"], encoding="utf-8")
 
+    if project_dest is not None:
+        # Wiped unconditionally, even when this version has zero project
+        # skills, so a stale project skill from a previous materialize()
+        # call never survives -- the same idempotency guarantee as skills_dir.
+        project_skills_dir = Path(project_dest) / ".grok" / "skills"
+        if project_skills_dir.exists():
+            shutil.rmtree(project_skills_dir)
+        if project_skills:
+            project_skills_dir.mkdir(parents=True)
+            for skill in project_skills:
+                skill_dir = project_skills_dir / skill["name"]
+                skill_dir.mkdir(parents=True, exist_ok=True)
+                (skill_dir / "SKILL.md").write_text(skill["content"], encoding="utf-8")
+    elif project_skills:
+        names = ", ".join(sorted(s["name"] for s in project_skills))
+        warning = (
+            f"project-scope skill(s) not materialized (no project_dest "
+            f"given): {names} -- patches against them will not take "
+            "effect, since grok resolves ./.grok/skills/ above "
+            "$GROK_HOME/skills/ and the original copy still wins"
+        )
+        if warning not in version["warnings"]:
+            version["warnings"].append(warning)
+
     config_text = version["config_text"]
     if seal:
-        config_text = _seal_config_text(config_text)
-        if _SEAL_WARNING not in version["warnings"]:
-            version["warnings"].append(_SEAL_WARNING)
+        config_text, notes = _seal_config_text(config_text)
+        warning = "sealed materialized home: " + "; ".join(notes)
+        if warning not in version["warnings"]:
+            version["warnings"].append(warning)
     (dest / "config.toml").write_text(config_text, encoding="utf-8")
 
     auth_src = Path(auth_from) / "auth.json"
@@ -297,7 +437,12 @@ def materialize(version, dest: Path, *, auth_from: Path, seal: bool = True) -> P
         raise FileNotFoundError(f"no auth.json at {auth_src}")
     # Copied, not symlinked: grok rewrites auth.json on token refresh, and a
     # symlink would let that refresh leak back into the source home.
-    shutil.copyfile(auth_src, dest / "auth.json")
+    dest_auth = dest / "auth.json"
+    shutil.copyfile(auth_src, dest_auth)
+    # copyfile copies bytes only, not mode -- explicitly restore 0600 so a
+    # 0600 source credential doesn't land world/group-readable under the
+    # default umask.
+    os.chmod(dest_auth, 0o600)
 
     (dest / "sessions").mkdir(parents=True, exist_ok=True)
     return dest
@@ -503,7 +648,7 @@ def apply(version, patches):
         applications.append(app)
 
     new_version = make_harness_version(
-        version_id=_compute_version_id(skills, config_text),
+        version_id=_compute_version_id(skills, config_text, extra_rules),
         skills=skills,
         mcp_servers=mcp_servers,
         config_text=config_text,

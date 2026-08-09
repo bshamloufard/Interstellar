@@ -1,8 +1,10 @@
 """Tests for interstellar/replay.py.
 
-Nothing here spawns grok-dev: the invocation is built through the injectable
-`runner` callable, so these tests assert argv/env directly and fabricate
-CompletedProcess-like results instead.
+Nothing here spawns grok-dev or calls the real harness.materialize: the grok
+invocation goes through the injectable `runner` callable and run_matrix's
+call into materialize goes through the injectable `materialize` callable, so
+these tests assert argv/env/call-order directly and fabricate results
+instead.
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ import unittest
 from pathlib import Path
 
 from interstellar.replay import GROK, isolated_workdir, run_matrix, run_once
-from interstellar.types import ARM_CONTROL, ARM_TREATMENT
+from interstellar.types import ARM_CONTROL, ARM_TREATMENT, make_harness_version
 
 
 def _ok_result(argv, sessionId="sess-1", **fields):
@@ -45,6 +47,31 @@ def _write_session(root: Path, session_id: str, *, with_events=True):
     return d
 
 
+def _ok_run(argv, kwargs, sessionId="sess-1", **fields):
+    """Like _ok_result, but also lands a normalizable session dir under the
+    GROK_HOME the runner was actually given -- needed for any test that
+    expects ok=True, now that a run with no findable session dir is
+    correctly ok=False (Important C)."""
+    home = Path(kwargs["env"]["GROK_HOME"])
+    _write_session(home, sessionId)
+    return _ok_result(argv, sessionId=sessionId, **fields)
+
+
+def _write_broken_session(root: Path, session_id: str):
+    """A session dir whose first event has no `ts`. grok_normalize computes
+    t0 from events[0] and crashes on the first later event that does have
+    one -- this is the exact failure Critical A exists to contain."""
+    d = root / "sessions" / "fake-cwd" / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"type": "turn_started", "turn_number": 0}),  # no ts
+        json.dumps({"type": "turn_ended", "ts": "2024-01-01T00:00:01Z",
+                   "outcome": "completed"}),
+    ]
+    (d / "events.jsonl").write_text("\n".join(lines) + "\n")
+    return d
+
+
 class RunOnceArgvEnvTests(unittest.TestCase):
     """The grok invocation itself: argv shape and GROK_HOME isolation."""
 
@@ -64,7 +91,7 @@ class RunOnceArgvEnvTests(unittest.TestCase):
         def fake_runner(argv, **kwargs):
             captured["argv"] = argv
             captured["kwargs"] = kwargs
-            return _ok_result(argv)
+            return _ok_run(argv, kwargs)
 
         result = run_once("do the thing", self.home, workdir=self.workdir,
                           runner=fake_runner)
@@ -178,14 +205,19 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertIsNotNone(result["trace"])
         self.assertEqual(result["trace"]["session"]["session_id"], "new-session-2")
 
-    def test_no_new_session_dir_leaves_trace_none(self):
+    def test_no_new_session_dir_marks_run_not_ok(self):
+        # Important C: a run with no findable session dir has no trace, and
+        # nine of ten efficiency metrics are read off the trace -- it must
+        # not be reported as an unremarked success.
         def fake_runner(argv, **kwargs):
             return _ok_result(argv, sessionId="never-landed")
 
         result = run_once("p", self.home, workdir=self.workdir, runner=fake_runner)
 
-        self.assertTrue(result["ok"])  # stdout parsed fine
+        self.assertFalse(result["ok"])
         self.assertIsNone(result["trace"])
+        self.assertIsNotNone(result["error"])
+        self.assertIn("no session directory", result["error"])
 
 
 class FailureModeTests(unittest.TestCase):
@@ -239,6 +271,32 @@ class FailureModeTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("no such binary", result["error"])
 
+    def test_never_raises_on_arbitrary_runner_exception(self):
+        # Critical B, at the run_once level: not just {TimeoutExpired,
+        # OSError} -- anything.
+        def fake_runner(argv, **kwargs):
+            raise subprocess.SubprocessError("child process died weirdly")
+
+        result = run_once("p", self.home, workdir=self.workdir, runner=fake_runner)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("child process died weirdly", result["error"])
+
+    def test_normalizer_crash_does_not_raise_and_sets_ok_false(self):
+        # Critical A: a malformed session (first event missing `ts`) makes
+        # grok_normalize raise TypeError. run_once must swallow it, not
+        # propagate it, and must not report the run as ok.
+        def fake_runner(argv, **kwargs):
+            _write_broken_session(self.home, "broken")
+            return _ok_result(argv, sessionId="broken")
+
+        result = run_once("p", self.home, workdir=self.workdir, runner=fake_runner)
+
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["trace"])
+        self.assertIsNotNone(result["error"])
+        self.assertIn("normalize", result["error"].lower())
+
 
 class IsolatedWorkdirTests(unittest.TestCase):
     def setUp(self):
@@ -248,7 +306,7 @@ class IsolatedWorkdirTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_plain_copy_for_non_repo(self):
+    def test_plain_copy(self):
         src = self.root / "src"
         src.mkdir()
         (src / "app.py").write_text("print('hi')\n")
@@ -262,7 +320,11 @@ class IsolatedWorkdirTests(unittest.TestCase):
         (dest / "app.py").write_text("print('mutated')\n")
         self.assertEqual((src / "app.py").read_text(), "print('hi')\n")
 
-    def test_git_worktree_for_repo(self):
+    def test_preserves_uncommitted_and_untracked_files_in_a_git_repo(self):
+        # Important D: this is the regression the copy-over-worktree ruling
+        # exists to prevent. `git worktree add --detach` reproduces HEAD
+        # only, which would silently drop both of these -- exactly the
+        # state the prompt being replayed actually ran against.
         if shutil.which("git") is None:
             self.skipTest("git not available")
         src = self.root / "repo"
@@ -270,46 +332,72 @@ class IsolatedWorkdirTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=src, check=True)
         subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=src, check=True)
         subprocess.run(["git", "config", "user.name", "t"], cwd=src, check=True)
-        (src / "app.py").write_text("print('hi')\n")
-        subprocess.run(["git", "add", "."], cwd=src, check=True)
+        (src / "committed.py").write_text("committed\n")
+        subprocess.run(["git", "add", "committed.py"], cwd=src, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=src, check=True)
+        (src / "committed.py").write_text("dirty\n")       # uncommitted change
+        (src / "untracked.py").write_text("untracked\n")   # untracked file
         dest = self.root / "dest"
 
-        out = isolated_workdir(src, dest)
+        isolated_workdir(src, dest)
 
-        self.assertEqual(out, dest)
-        self.assertEqual((dest / "app.py").read_text(), "print('hi')\n")
-        # It's a worktree, not a plain copy: it has its own .git pointer file.
-        self.assertTrue((dest / ".git").exists())
+        self.assertEqual((dest / "committed.py").read_text(), "dirty\n")
+        self.assertEqual((dest / "untracked.py").read_text(), "untracked\n")
+        self.assertFalse((dest / ".git").exists())
 
-        subprocess.run(["git", "worktree", "remove", "--force", str(dest)],
-                       cwd=src, check=True)
+    def test_ignores_git_and_build_dirs(self):
+        src = self.root / "src"
+        (src / ".git").mkdir(parents=True)
+        (src / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        (src / "target").mkdir()
+        (src / "target" / "big.bin").write_text("junk\n")
+        (src / "keep.py").write_text("keep\n")
+        dest = self.root / "dest"
+
+        isolated_workdir(src, dest)
+
+        self.assertTrue((dest / "keep.py").exists())
+        self.assertFalse((dest / ".git").exists())
+        self.assertFalse((dest / "target").exists())
 
 
 class RunMatrixTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.control_home = self.root / "control-home"
-        self.treatment_home = self.root / "treatment-home"
         self.workspace = self.root / "workspace"
         self.scratch = self.root / "scratch"
-        for d in (self.control_home, self.treatment_home, self.workspace):
-            d.mkdir(parents=True)
+        self.auth_from = self.root / "auth-src"
+        self.workspace.mkdir(parents=True)
+        self.auth_from.mkdir(parents=True)
+        (self.auth_from / "auth.json").write_text("{}")
         (self.workspace / "app.py").write_text("x = 1\n")
+
+        self.control = make_harness_version(
+            version_id="c1", skills=[], mcp_servers=[], config_text="")
+        self.treatment = make_harness_version(
+            version_id="t1", skills=[], mcp_servers=[], config_text="",
+            extra_rules=["Be brief."])
 
     def tearDown(self):
         self.tmp.cleanup()
 
+    @staticmethod
+    def _fake_materialize(version, dest, *, auth_from, project_dest=None):
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "sessions").mkdir(parents=True, exist_ok=True)
+        return dest
+
     def test_produces_2k_results(self):
         def fake_runner(argv, **kwargs):
-            return _ok_result(argv)
+            return _ok_run(argv, kwargs)
 
         matrix = run_matrix(
-            "prompt", control=self.control_home, treatment=self.treatment_home,
+            "prompt", control=self.control, treatment=self.treatment,
             k=2, workspace=self.workspace, scratch=self.scratch,
-            max_parallel=2, runner=fake_runner,
-            control_version_id="c1", treatment_version_id="t1",
+            auth_from=self.auth_from, max_parallel=2,
+            runner=fake_runner, materialize=self._fake_materialize,
         )
 
         self.assertEqual(matrix["k"], 2)
@@ -326,6 +414,25 @@ class RunMatrixTests(unittest.TestCase):
             self.assertTrue(r["ok"])
             self.assertEqual(r["arm"], ARM_TREATMENT)
 
+    def test_treatment_extra_rules_come_from_the_version_dict(self):
+        captured = []
+
+        def fake_runner(argv, **kwargs):
+            captured.append(argv)
+            return _ok_result(argv)
+
+        run_matrix(
+            "prompt", control=self.control, treatment=self.treatment,
+            k=1, workspace=self.workspace, scratch=self.scratch,
+            auth_from=self.auth_from, max_parallel=1,
+            runner=fake_runner, materialize=self._fake_materialize,
+        )
+
+        control_argv, treatment_argv = captured
+        self.assertNotIn("--rules", control_argv)
+        self.assertIn("--rules", treatment_argv)
+        self.assertIn("Be brief.", treatment_argv[treatment_argv.index("--rules") + 1])
+
     def test_tolerates_one_arm_failing(self):
         # Fail every treatment run, succeed every control run. The fake
         # runner distinguishes them by looking at cwd, which run_matrix
@@ -333,12 +440,13 @@ class RunMatrixTests(unittest.TestCase):
         def fake_runner(argv, **kwargs):
             if "treatment" in kwargs["cwd"]:
                 raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
-            return _ok_result(argv)
+            return _ok_run(argv, kwargs)
 
         matrix = run_matrix(
-            "prompt", control=self.control_home, treatment=self.treatment_home,
+            "prompt", control=self.control, treatment=self.treatment,
             k=2, workspace=self.workspace, scratch=self.scratch,
-            max_parallel=2, runner=fake_runner,
+            auth_from=self.auth_from, max_parallel=2,
+            runner=fake_runner, materialize=self._fake_materialize,
         )
 
         self.assertEqual(len(matrix["arms"][ARM_CONTROL]), 2)
@@ -348,6 +456,89 @@ class RunMatrixTests(unittest.TestCase):
         # The matrix itself is always returned, never raised, regardless of
         # how many individual runs failed.
         self.assertIn("arms", matrix)
+
+    def test_tolerates_arbitrary_runner_exception(self):
+        # Critical B: not just {TimeoutExpired, OSError} -- run_matrix must
+        # survive any exception a runner (or materialize, or isolated_workdir)
+        # can throw, or one bad run destroys every already-succeeded run and
+        # everything already spent on them.
+        def fake_runner(argv, **kwargs):
+            if "treatment" in kwargs["cwd"]:
+                raise subprocess.SubprocessError("child process died weirdly")
+            return _ok_run(argv, kwargs)
+
+        matrix = run_matrix(
+            "prompt", control=self.control, treatment=self.treatment,
+            k=1, workspace=self.workspace, scratch=self.scratch,
+            auth_from=self.auth_from, max_parallel=1,
+            runner=fake_runner, materialize=self._fake_materialize,
+        )
+
+        self.assertTrue(matrix["arms"][ARM_CONTROL][0]["ok"])
+        self.assertFalse(matrix["arms"][ARM_TREATMENT][0]["ok"])
+        self.assertIn("child process died weirdly",
+                      matrix["arms"][ARM_TREATMENT][0]["error"])
+
+    def test_tolerates_materialize_exception(self):
+        def flaky_materialize(version, dest, *, auth_from, project_dest=None):
+            if version["version_id"] == "t1":
+                raise RuntimeError("disk full")
+            return self._fake_materialize(version, dest, auth_from=auth_from,
+                                          project_dest=project_dest)
+
+        matrix = run_matrix(
+            "prompt", control=self.control, treatment=self.treatment,
+            k=1, workspace=self.workspace, scratch=self.scratch,
+            auth_from=self.auth_from, max_parallel=1,
+            runner=lambda argv, **kw: _ok_run(argv, kw),
+            materialize=flaky_materialize,
+        )
+
+        self.assertTrue(matrix["arms"][ARM_CONTROL][0]["ok"])
+        self.assertFalse(matrix["arms"][ARM_TREATMENT][0]["ok"])
+        self.assertIn("disk full", matrix["arms"][ARM_TREATMENT][0]["error"])
+
+    def test_project_skills_removed_before_materialize_with_project_dest(self):
+        # The new requirement: grok resolves ./.grok/skills above GROK_HOME,
+        # so a patched project-scope skill written only to GROK_HOME would
+        # be silently shadowed by the unpatched copy isolated_workdir just
+        # reproduced. Order must be: (1) copy workdir, (2) delete its
+        # .grok/skills, (3) materialize with project_dest=that workdir.
+        (self.workspace / ".grok" / "skills" / "demo").mkdir(parents=True)
+        (self.workspace / ".grok" / "skills" / "demo" / "SKILL.md").write_text("ORIGINAL\n")
+        (self.workspace / ".grok" / "rules").mkdir(parents=True)  # untouched sibling
+
+        calls = []
+
+        def spy_materialize(version, dest, *, auth_from, project_dest=None):
+            calls.append({
+                "project_dest": project_dest,
+                "grok_skills_present": (project_dest / ".grok" / "skills").exists()
+                                       if project_dest else None,
+                "grok_rules_present": (project_dest / ".grok" / "rules").exists()
+                                      if project_dest else None,
+            })
+            return self._fake_materialize(version, dest, auth_from=auth_from,
+                                          project_dest=project_dest)
+
+        run_matrix(
+            "prompt", control=self.control, treatment=self.treatment,
+            k=1, workspace=self.workspace, scratch=self.scratch,
+            auth_from=self.auth_from, max_parallel=1,
+            runner=lambda argv, **kw: _ok_result(argv),
+            materialize=spy_materialize,
+        )
+
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertIsNotNone(call["project_dest"])
+            # .grok/skills was deleted from the workdir copy by the time
+            # materialize ran ...
+            self.assertFalse(call["grok_skills_present"])
+            # ... but only skills/, not the rest of .grok/.
+            self.assertTrue(call["grok_rules_present"])
+            # project_dest really is the (rest of the) workspace copy.
+            self.assertTrue((call["project_dest"] / "app.py").exists())
 
     def test_dispatch_order_is_interleaved(self):
         # A single worker dequeues submitted tasks strictly FIFO, so with
@@ -364,9 +555,10 @@ class RunMatrixTests(unittest.TestCase):
             return _ok_result(argv)
 
         run_matrix(
-            "prompt", control=self.control_home, treatment=self.treatment_home,
+            "prompt", control=self.control, treatment=self.treatment,
             k=3, workspace=self.workspace, scratch=self.scratch,
-            max_parallel=1, runner=fake_runner,
+            auth_from=self.auth_from, max_parallel=1,
+            runner=fake_runner, materialize=self._fake_materialize,
         )
 
         self.assertEqual(order, [
@@ -384,9 +576,10 @@ class RunMatrixTests(unittest.TestCase):
             return _ok_result(argv)
 
         run_matrix(
-            "prompt", control=self.control_home, treatment=self.treatment_home,
+            "prompt", control=self.control, treatment=self.treatment,
             k=2, workspace=self.workspace, scratch=self.scratch,
-            max_parallel=3, runner=fake_runner,
+            auth_from=self.auth_from, max_parallel=3,
+            runner=fake_runner, materialize=self._fake_materialize,
         )
 
         self.assertEqual(len(seen_homes), 4)

@@ -670,10 +670,6 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             "this machine -- cannot safely replay the original prompt"
         )
 
-    control_template = harness.materialize(
-        baseline_version, out_dir / "scratch" / "control-template",
-        auth_from=real_grok_home)
-
     patch_results = []
     total_cost = 0.0
     if not use_cached_analysis and analysis_meta.get("cost_usd"):
@@ -691,17 +687,17 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
         patch_scratch = out_dir / "scratch" / patch["patch_id"]
 
         if application["applied"]:
-            treatment_template = harness.materialize(
-                treatment_version, patch_scratch / "treatment-template",
-                auth_from=real_grok_home)
+            # run_matrix materializes both arms itself, once per run (see
+            # its docstring): a shared pre-built home would carry the
+            # workdir's original, unpatched project-scope .grok/skills/,
+            # which outranks $GROK_HOME/skills/ in grok's own precedence and
+            # would silently shadow a patched project skill. control/
+            # treatment are passed as HarnessVersion dicts, not paths.
             matrix = replay.run_matrix(
-                prompt, control=control_template, treatment=treatment_template,
+                prompt, control=baseline_version, treatment=treatment_version,
                 k=k, workspace=workspace, scratch=patch_scratch / "runs",
+                auth_from=real_grok_home,
                 max_parallel=max_parallel, timeout=timeout, model=model,
-                control_version_id=baseline_version["version_id"],
-                treatment_version_id=treatment_version["version_id"],
-                control_extra_rules=baseline_version["extra_rules"],
-                treatment_extra_rules=treatment_version["extra_rules"],
                 patch_id=patch["patch_id"], runner=runner)
             grades = grade.grade_matrix(matrix, prompt=prompt, grok=judge_grok)
 

@@ -526,5 +526,57 @@ class SynthesizeInsertTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class ExtractStructuredOutputTests(unittest.TestCase):
+    """`_default_grok`'s structuredOutput-first precedence, tested against
+    the parsed CLI envelope directly so nothing here shells out to
+    grok-dev."""
+
+    def test_reads_structured_output_over_text(self):
+        out = {
+            "text": '{"lines": ["from text buffer"], "anchor_line": 9}',
+            "structuredOutput": {"lines": ["from structured output"], "anchor_line": 1},
+            "structuredOutputError": None,
+            "total_cost_usd": 0.01,
+        }
+        result = patches._extract_structured_output(out)
+        self.assertEqual(result, {"lines": ["from structured output"], "anchor_line": 1})
+
+    def test_structured_output_error_raises_even_if_text_looks_parseable(self):
+        out = {
+            "text": '{"lines": ["looks fine"], "anchor_line": 1}',
+            "structuredOutput": None,
+            "structuredOutputError": "schema validation failed: missing anchor_line",
+        }
+        with self.assertRaises(patches.GrokCallError):
+            patches._extract_structured_output(out)
+
+    def test_falls_back_to_text_when_structured_output_key_absent(self):
+        out = {"text": '{"lines": ["from text buffer"], "anchor_line": 2}'}
+        result = patches._extract_structured_output(out)
+        self.assertEqual(result, {"lines": ["from text buffer"], "anchor_line": 2})
+
+    def test_text_fallback_raises_legibly_on_unparseable_text(self):
+        out = {"text": "I decline to answer in JSON."}
+        with self.assertRaises(patches.GrokCallError):
+            patches._extract_structured_output(out)
+
+    def test_null_structured_output_with_no_error_raises_legibly(self):
+        out = {"structuredOutput": None, "structuredOutputError": None}
+        with self.assertRaises(patches.GrokCallError):
+            patches._extract_structured_output(out)
+
+    def test_default_grok_failure_surfaces_as_none_through_synthesize_insert(self):
+        # End-to-end: a grok that raises GrokCallError (as _default_grok
+        # would on a real structuredOutputError) still yields None, not a
+        # crash, from synthesize_insert.
+        rec = _rec()
+
+        def failing_grok(prompt, schema):
+            raise patches.GrokCallError("structuredOutputError: boom")
+
+        result = patches.synthesize_insert(rec, "l1\nl2", grok=failing_grok)
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

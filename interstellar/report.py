@@ -529,30 +529,56 @@ def _matrix_summary_line(matrix):
 
 
 def _gate_badge(gate):
-    """Three honest states, not accept/reject (research-methods.md, gate
-    follow-up). At small k the gate legitimately cannot accept most patches
-    — that is the normal case for this demo, not a failure, so a patch that
-    only has directional evidence must never render as a red REJECT: the
-    right next action is "run more repeats," not "throw this away."
+    """Five honest states (stats.gate()'s actual truth table), not a
+    boolean and not even a clean three-way split — `accepted` and
+    `provisional` can both be True at once (n in [5,10): no CI exists, but
+    zero losses passed the only check available there), and stats.gate()'s
+    own docstring is explicit that this combination "should render as a
+    qualified verdict, not a clean pass."
 
-      ACCEPTED               — statistics support it outright.
-      PROVISIONAL            — passed the available checks; k caps the claim.
-      DIRECTIONAL: <reading>  — evidence leans somewhere; k cannot confirm it.
+      ACCEPTED                — n>=10, full CI-backed pass.
+      ACCEPTED · PROVISIONAL  — n in [5,10): passed the only available
+                                 check (zero losses), no CI to back it.
+      PROVISIONAL · <reading> — n in [5,10): a loss was observed, so this
+                                 zone's only pass criterion failed; still no
+                                 CI, so this isn't rendered as a confident
+                                 reject either — just what the evidence
+                                 leans toward.
+      DIRECTIONAL · <reading> — n<5: acceptance is impossible by
+                                 construction (reasons contains the literal
+                                 "insufficient_samples_for_acceptance"
+                                 marker stats.gate() guarantees there) — the
+                                 right next action is "run more repeats,"
+                                 not "throw this away," so this must never
+                                 render as a red REJECT.
+      REJECTED                — n>=10, full CI-backed rejection: a real,
+                                 well-powered "no," distinct from the small-n
+                                 states above.
 
     Falls back to a legacy REJECT only for a gate dict that predates the
     provisional/directional fields entirely (accepted=False and neither key
     present) so an old-shaped gate still renders instead of crashing.
     """
-    if gate.get("accepted"):
+    accepted = bool(gate.get("accepted"))
+    provisional = bool(gate.get("provisional"))
+    has_directional = "directional" in gate
+    reading = (gate.get("directional") or "neutral").lower()
+    reading_cls = {"favorable": "directional-favorable", "unfavorable": "directional-unfavorable"}.get(
+        reading, "directional-neutral"
+    )
+
+    if accepted and provisional:
+        return '<span class="badge accept-provisional">ACCEPTED &middot; PROVISIONAL</span>'
+    if accepted:
         return '<span class="badge accept">ACCEPTED</span>'
-    if gate.get("provisional"):
-        return '<span class="badge provisional">PROVISIONAL</span>'
-    if "directional" in gate:
-        reading = (gate.get("directional") or "neutral").lower()
-        cls = {"favorable": "directional-favorable", "unfavorable": "directional-unfavorable"}.get(
-            reading, "directional-neutral"
-        )
-        return f'<span class="badge {cls}">DIRECTIONAL &middot; {_esc(reading.upper())}</span>'
+    if provisional:
+        return f'<span class="badge {reading_cls}">PROVISIONAL &middot; {_esc(reading.upper())}</span>'
+    if has_directional:
+        reasons = gate.get("reasons") or []
+        too_few_for_any_call = any("insufficient_samples_for_acceptance" in r for r in reasons)
+        if too_few_for_any_call:
+            return f'<span class="badge {reading_cls}">DIRECTIONAL &middot; {_esc(reading.upper())}</span>'
+        return '<span class="badge reject">REJECTED</span>'
     return '<span class="badge reject">REJECT</span>'
 
 
@@ -960,9 +986,13 @@ ul.patch-caveats li::before { content: "\26A0  "; color: var(--warn); }
 .badge.kind { color: #93c5fd; border-color: #334155; text-transform: none; }
 .badge.accept { color: var(--good); border-color: var(--good); background: var(--good-dim); }
 .badge.reject { color: var(--bad); border-color: var(--bad); background: var(--bad-dim); }
-/* A patch that only has directional evidence at small k is not a failure —
-   it needs one more cycle of repeats, not a red badge implying it's bad. */
-.badge.provisional { color: var(--provisional); border-color: var(--provisional); background: var(--provisional-dim); }
+/* Passed, but only via the n=5-9 zero-CI fallback -- still green (it DID
+   pass) but the dashed border marks it "qualified," not a clean accept. */
+.badge.accept-provisional { color: var(--good); border-color: var(--good); background: var(--good-dim); border-style: dashed; }
+/* A patch that only has directional/provisional evidence at small k is not
+   a failure — it needs one more cycle of repeats, not a red badge implying
+   it's bad. Reused for both the n<5 DIRECTIONAL and n=5-9 PROVISIONAL·loss
+   states, which share the same favorable/unfavorable/neutral coloring. */
 .badge.directional-favorable { color: var(--favorable); border-color: var(--favorable); background: var(--favorable-dim); }
 .badge.directional-unfavorable { color: var(--unfavorable); border-color: var(--unfavorable); background: var(--unfavorable-dim); }
 .badge.directional-neutral { color: var(--neutral-reading); border-color: var(--neutral-reading); background: var(--neutral-reading-dim); }

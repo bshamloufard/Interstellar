@@ -110,6 +110,49 @@ def security_lint(text: str) -> list[str]:
 
 # --- the model call ----------------------------------------------------------
 
+class GrokCallError(RuntimeError):
+    """Raised by `_default_grok` when grok-dev did not return a usable
+    structured result. `synthesize_insert` catches this (along with any
+    other exception) and returns None -- this class exists so the specific
+    reason is legible to anything that inspects it directly (tests, logs),
+    instead of collapsing into an opaque JSONDecodeError that looks
+    indistinguishable from "the model declined"."""
+
+
+def _extract_structured_output(out: dict):
+    """Pull the schema-validated result out of grok-dev's parsed JSON
+    envelope `out`.
+
+    Reads the validated `structuredOutput` field the CLI attaches at top
+    level when `--json-schema` is passed, not the `text` message buffer:
+    `text` happens to carry the same JSON on today's backend, but that is
+    not the contract -- a different backend can deliver the schema result
+    only via a synthetic tool call, leaving `text` empty or prose.
+    `structuredOutputError` non-null means the call failed even if `text`
+    looks parseable. `text` is used only when `structuredOutput` is absent
+    from the response entirely (an older CLI, or a schema-less call).
+
+    Split out from `_default_grok` so this precedence logic is testable
+    without shelling out to grok-dev.
+    """
+    error = out.get("structuredOutputError")
+    if error:
+        raise GrokCallError(f"structuredOutputError: {error}")
+
+    if "structuredOutput" in out:
+        structured = out["structuredOutput"]
+        if structured is not None:
+            return structured
+        raise GrokCallError("structuredOutput is null with no structuredOutputError")
+
+    # structuredOutput key absent entirely -- fall back to the text buffer.
+    text = out.get("text") or ""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise GrokCallError(f"no structuredOutput and text was not valid JSON: {e}") from e
+
+
 def _default_grok(prompt, schema, *, timeout=600):
     """Shell out to grok-dev, same invocation pattern as analyzer.analyze."""
     cmd = [str(GROK), "-p", prompt,
@@ -117,9 +160,11 @@ def _default_grok(prompt, schema, *, timeout=600):
            "--permission-mode", "bypassPermissions",
            "--disallowed-tools", "run_terminal_command,read_file,write,search_replace"]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    out = json.loads(proc.stdout)
-    text = out.get("text") or "{}"
-    return json.loads(text)
+    try:
+        out = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise GrokCallError(f"grok-dev stdout was not JSON: {e}") from e
+    return _extract_structured_output(out)
 
 
 def synthesize_insert(rec, skill_text, *, grok=_default_grok):
