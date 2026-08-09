@@ -12,10 +12,14 @@ cd ~/interstellar-demo/checkout
 GROK_HOME=~/.grok-interstellar-demo grok
 ```
 
-In the TUI: `/dashboard` (or `/resume`) — the "Checkout total wrong with discount
-code" session is listed like any other past conversation. Open it. Scroll: the
-skill load, the `locale.py` dead end, the 20-second diagnostics call, the
-re-reads, the eventual fix, tests passing.
+In the TUI: **`/resume`** — the session picker for past conversations on disk,
+scoped to the current workspace. (Not `/dashboard`: that lists *live* agent
+sessions in this pager process's active roster, not saved history — a
+fabricated session was never loaded by a live process, so it won't appear
+there.) The "Checkout total wrong with discount code" session is listed like
+any other past conversation. Open it. Scroll: the skill load, the `locale.py`
+dead end, the 20-second diagnostics call, the re-reads, the eventual fix,
+tests passing.
 
 ## Beat 2 — visualize it
 
