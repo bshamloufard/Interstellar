@@ -770,7 +770,7 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
     unconditional final step -- nothing computed earlier in this function
     can survive that override (fix-round-2 review, Critical).
 
-    Returns {accepted, provisional, directional, reasons}:
+    Returns {accepted, provisional, directional, quality_evidence, reasons}:
       accepted    - bool, the final call.
       provisional - bool. True iff the decision rests on evidence weaker
                     than the module's full-power regime: the whole small-n
@@ -790,6 +790,18 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
                     were usable at all -- "neutral" is reserved for an
                     actual measured null result and must never stand in
                     for "nothing ran".
+      quality_evidence - "none" | "ties_only" | "decided" (fix-round-4
+                    review, Important I2): how much real win/loss signal
+                    backs `directional`. "none" is zero judged pairs;
+                    "ties_only" is judged pairs that were all ties (zero
+                    decided); "decided" is at least one real win or loss.
+                    A "favorable" directional with quality_evidence !=
+                    "decided" is real efficiency evidence with NO quality
+                    corroboration behind it -- `reasons` spells this out
+                    explicitly in that case (see the 1b check below) so a
+                    reader can't mistake "efficiency alone had an opinion"
+                    for "quality held and efficiency improved". Always
+                    "none" in the no-data short-circuit above.
       reasons     - list[str], one per check, for both accept and reject,
                     so the report can always explain itself. Includes two
                     informational lines (judge position-consistency, the
@@ -832,7 +844,7 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
                 f"/{pairs_total if pairs_total is not None else '?'}"
             )
         return {"accepted": False, "provisional": False, "directional": "unknown",
-                "reasons": no_data_reasons}
+                "quality_evidence": "none", "reasons": no_data_reasons}
 
     reasons = []
     accepted = True
@@ -850,6 +862,25 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
     efficiency = summary.get("efficiency") or {}
     primary_entry = efficiency.get(primary_metric) if primary_metric else None
     directional = _directional(wr, primary_entry)
+
+    # quality_evidence (fix-round-4 review, Important I2): how much real
+    # win/loss signal backs `directional`. "none" -- zero judged pairs at
+    # all; "ties_only" -- judged pairs exist but none were decided (every
+    # one a tie); "decided" -- at least one real win or loss. Without this,
+    # a report can't tell "favorable, corroborated by quality" apart from
+    # "favorable, efficiency alone had an opinion and quality said nothing"
+    # -- verified in a real dashboard rendering DIRECTIONAL·FAVORABLE off
+    # win_rate={wins:0, ties:1, losses:0, n:1}, i.e. one tie and nothing
+    # else. The efficiency evidence in that case can be entirely real (e.g.
+    # a genuine 47% token reduction) -- this field doesn't discard it, it
+    # just stops it from masquerading as quality-corroborated.
+    decided = wins + losses
+    if n == 0:
+        quality_evidence = "none"
+    elif decided == 0:
+        quality_evidence = "ties_only"
+    else:
+        quality_evidence = "decided"
 
     # Computed first, per the Critical fix, so it can dominate everything
     # below -- see the unconditional override at the very end of this
@@ -903,6 +934,20 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
                 f"quality regression: {losses} loss(es), win-rate lower CI "
                 f"{lo!r} does not clear 0.5"
             )
+
+    # --- 1b. flag when a favorable/unfavorable directional reading has no
+    # decided quality evidence behind it (fix-round-4 review, Important I2)
+    # -- see quality_evidence above. A "neutral"/"unknown" directional
+    # doesn't need this caveat: there's no optimistic claim to qualify. ---
+    if quality_evidence != "decided" and directional in ("favorable", "unfavorable"):
+        if quality_evidence == "none":
+            quality_desc = "no judged quality pairs at all"
+        else:
+            quality_desc = f"{ties} judged pair(s), all ties -- zero decided quality evidence"
+        reasons.append(
+            f'directional reading ("{directional}") rests on efficiency alone: '
+            f"{quality_desc}, not corroborated by any win or loss"
+        )
 
     # --- 2. high-severity regressions ---
     if has_high_severity:
@@ -1031,4 +1076,5 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
         directional = "unfavorable"
 
     return {"accepted": accepted, "provisional": provisional,
-            "directional": directional, "reasons": reasons}
+            "directional": directional, "quality_evidence": quality_evidence,
+            "reasons": reasons}

@@ -939,6 +939,39 @@ class FixRound3ReviewTests(unittest.TestCase):
         self.assertIn('tr class="bad hl"', html_text)
         self.assertIn("cost more", html_text)
 
+    # --- cache_sensitive flag: mark cache-warmth-affected metrics without
+    # letting them discount the deterministic target metric next to them ---
+
+    def test_cache_sensitive_metrics_are_marked_target_metric_is_not(self):
+        pr = _accepted_patch_result()
+        eff = pr["statistics"]["efficiency"]
+        eff["total_tokens"]["cache_sensitive"] = True
+        eff["cost_usd"]["cache_sensitive"] = True
+        # skill_tokens_est (the target metric here) is left unmarked --
+        # deterministic, not cache-affected, per the team-lead's report
+        self._build_and_write([pr], k=12)
+        html_text = self._html()
+        rows = html_text.split("<tbody>")[1].split("</tbody>")[0].split("</tr>")
+        total_row = next(r for r in rows if "Total tokens" in r)
+        cost_row = next(r for r in rows if "Cost (USD)" in r)
+        target_row = next(r for r in rows if "Skill tokens (est.)" in r)
+        self.assertIn('class="tag cache-tag"', total_row)
+        self.assertIn('class="tag cache-tag"', cost_row)
+        self.assertNotIn('class="tag cache-tag"', target_row)
+        self.assertIn("prompt-cache warmth", html_text)
+        self.assertIn("indicative, not as a precise measurement", html_text)
+        # legend appears exactly once per table, not once per flagged row
+        self.assertEqual(html_text.count('class="cache-legend'), 1)
+
+    def test_cache_sensitive_flag_absent_renders_no_marker_no_legend(self):
+        # older reports (statistics predating the flag) must render clean --
+        # every real-stats fixture already omits the key entirely, so this
+        # is the default path, not a special case
+        self._build_and_write([_accepted_patch_result()], k=12)
+        html_text = self._html()
+        self.assertNotIn('class="tag cache-tag"', html_text)
+        self.assertNotIn('class="cache-legend', html_text)
+
     # --- Minors worth a regression test ---
 
     def test_esc_none_is_empty_not_a_dash(self):

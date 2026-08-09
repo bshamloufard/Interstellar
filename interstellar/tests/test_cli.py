@@ -407,6 +407,76 @@ class CountRunsTests(unittest.TestCase):
         self.assertEqual(cli._count_runs(patch_results), (0, 0))
 
 
+class CacheReadRangeTests(unittest.TestCase):
+    def _run(self, cache_read):
+        return {"usage": {"cache_read_input_tokens": cache_read}} if cache_read is not None \
+            else {"usage": {}}
+
+    def test_min_max_across_patches_and_arms(self):
+        patch_results = [
+            {"matrix": {"arms": {
+                "control": [self._run(27648), self._run(41600)],
+                "treatment": [self._run(16768)],
+            }}},
+            {"matrix": {"arms": {
+                "control": [self._run(41728)],
+                "treatment": [self._run(31360), self._run(42752)],
+            }}},
+        ]
+        self.assertEqual(cli._cache_read_range(patch_results), (16768, 42752))
+
+    def test_none_when_no_usage_data(self):
+        patch_results = [{"matrix": {"arms": {
+            "control": [self._run(None)], "treatment": [self._run(None)],
+        }}}]
+        self.assertIsNone(cli._cache_read_range(patch_results))
+
+    def test_none_for_empty_patch_results(self):
+        self.assertIsNone(cli._cache_read_range([]))
+
+
+class CacheWarmthCaveatTests(unittest.TestCase):
+    def test_none_when_no_usage_data(self):
+        self.assertIsNone(cli._cache_warmth_caveat([]))
+
+    def test_states_this_cycles_real_observed_range(self):
+        patch_results = [{"matrix": {"arms": {
+            "control": [{"usage": {"cache_read_input_tokens": 16768}}],
+            "treatment": [{"usage": {"cache_read_input_tokens": 42752}}],
+        }}}]
+        caveat = cli._cache_warmth_caveat(patch_results)
+        self.assertIn("16,768", caveat)
+        self.assertIn("42,752", caveat)
+        self.assertIn("prompt-cache warmth", caveat)
+        self.assertIn("cost_usd", caveat)
+
+    def test_never_states_a_canned_figure(self):
+        # The 16k-43k figure from the reported cycle must never appear
+        # unless THIS cycle's own data actually produced it.
+        patch_results = [{"matrix": {"arms": {
+            "control": [{"usage": {"cache_read_input_tokens": 5000}}],
+            "treatment": [{"usage": {"cache_read_input_tokens": 5200}}],
+        }}}]
+        caveat = cli._cache_warmth_caveat(patch_results)
+        self.assertIn("5,000", caveat)
+        self.assertIn("5,200", caveat)
+        self.assertNotIn("16,", caveat)
+        self.assertNotIn("43,", caveat)
+
+
+class CacheSensitiveMetricsTests(unittest.TestCase):
+    def test_classifies_exactly_the_named_metrics(self):
+        self.assertTrue(cli.CACHE_SENSITIVE_METRICS["total_tokens"])
+        self.assertTrue(cli.CACHE_SENSITIVE_METRICS["cost_usd"])
+        for name in ("skill_tokens_est", "skill_wasted_tokens_est",
+                    "tool_calls", "turns", "duplicate_calls"):
+            self.assertFalse(cli.CACHE_SENSITIVE_METRICS[name])
+
+    def test_leaves_unclassified_metrics_out_rather_than_guessing(self):
+        for name in ("wall_ms", "tool_result_tokens_est", "mcp_startup_ms"):
+            self.assertNotIn(name, cli.CACHE_SENSITIVE_METRICS)
+
+
 def _patch_for_verdict(kind="skill.truncate", target="strict-audit"):
     return {"kind": kind, "target": target}
 
@@ -856,6 +926,52 @@ class ProgressJournalTests(unittest.TestCase):
         self.assertIn("DIRECTIONAL: FAVORABLE", printed)
         self.assertIn(f"--k {cli.stats.MIN_SAMPLES_FOR_CI}", printed)
         self.assertIn("directional-only", printed)
+
+    def test_report_carries_cache_warmth_caveat_and_metric_flags(self):
+        # Real observed cache_read_input_tokens swing, varying per call
+        # (like the reported live cycle) rather than a fixed number.
+        # Exactly 4 values for exactly the 4 replay calls this fixture's
+        # k=1, 2-selected-patch cycle makes (preflight disabled so its own
+        # probe call -- not part of any patch's matrix -- can't shift the
+        # range this test asserts on).
+        cache_reads = [16768, 41600, 27648, 41728]
+        call = {"n": 0}
+
+        def varying_cache_runner(argv, **kwargs):
+            env = kwargs.get("env") or {}
+            home = env.get("GROK_HOME")
+            if home:
+                (Path(home) / "sessions" / "fake-cwd" / "fake-session").mkdir(
+                    parents=True, exist_ok=True)
+            reads = cache_reads[call["n"] % len(cache_reads)]
+            call["n"] += 1
+            return _FakeCompletedProcess(json.dumps({
+                "sessionId": "fake-session",
+                "text": "fake response text",
+                "total_cost_usd": 0.05,
+                "num_turns": 1,
+                "usage": {"total_tokens": 47000, "cache_read_input_tokens": reads},
+            }))
+
+        rpt = self._run(runner=varying_cache_runner, no_preflight=True)
+
+        self.assertEqual(rpt["cache_sensitive_metrics"], cli.CACHE_SENSITIVE_METRICS)
+        caveats_text = " ".join(rpt["caveats"])
+        self.assertIn("prompt-cache warmth", caveats_text)
+        self.assertIn(f"{min(cache_reads):,}", caveats_text)
+        self.assertIn(f"{max(cache_reads):,}", caveats_text)
+
+    def test_no_patches_report_carries_metric_flags_but_no_cache_caveat(self):
+        # Nothing was measured -- the classification metadata is still a
+        # constant fact worth attaching, but there is no real range to
+        # disclose, so the caveat itself must not appear (never a
+        # fabricated generic warning).
+        rpt = self._run(analyze_fn=lambda dig, model=None: (
+            {"session_verdict": "clean", "recommendations": []}, {}))
+        self.assertEqual(rpt["patch_results"], [])
+        self.assertEqual(rpt["cache_sensitive_metrics"], cli.CACHE_SENSITIVE_METRICS)
+        caveats_text = " ".join(rpt["caveats"])
+        self.assertNotIn("prompt-cache warmth", caveats_text)
 
     def test_journals_progress_after_each_patch(self):
         writes = []

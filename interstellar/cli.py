@@ -48,6 +48,14 @@ silently:
     `total_cost_usd` on a run, or `meta.cost_usd` recorded by a past
     analyzer run) or is clearly labelled as an estimate and states which
     measurements it was derived from. Nothing is invented.
+  * `total_tokens` and `cost_usd` are confounded by prompt-cache warmth
+    (`cache_read_input_tokens` swings run to run independently of the
+    harness -- interleaved dispatch blunts but does not eliminate it); the
+    report says so with THIS cycle's own observed range
+    (`_cache_warmth_caveat`), never a canned figure, and every report also
+    carries `cache_sensitive_metrics` (`CACHE_SENSITIVE_METRICS`) naming
+    which of the ten efficiency metrics are cache-driven versus counted
+    straight off the trace/harness.
   * Before spending a cycle, one cheap grok-dev call runs through the
     baseline home (`_run_preflight`, skipped by `--dry-run` or
     `--no-preflight`) so an auth/environment failure is caught once instead
@@ -526,6 +534,47 @@ def _cost_estimate(selected_patches, *, k, use_cached_analysis, repo_root):
     }
 
 
+def _check_workspace_out_collision(workspace, out_dir):
+    """Refuse when `out_dir` and `workspace` are nested inside each other.
+
+    `replay.isolated_workdir` copies `workspace` into a directory under
+    `out_dir`'s own scratch tree for every run; if `out_dir` (or that
+    scratch tree) is itself inside `workspace`, that copy recurses into
+    its own destination -- final-review.md C1. This is not a rare
+    misconfiguration: the documented default (`--out` unset ->
+    `runs/<timestamp>`, resolved against the invocation cwd) collides with
+    the headline use case, "review a session captured while working in
+    your own repo" -- there `workspace` (the trace's recorded
+    `session.cwd`) IS that repo, and `--out`'s default lands right inside
+    it. Every run then fails deep in the copy with an OSError, which
+    `replay.py`'s never-raise design turns into an ordinary `ok=False` on
+    every run, which the all-runs-failed check then (correctly, but
+    misleadingly) reports as an auth/environment failure -- so this must
+    be caught here, at plan time, before the preflight call spends
+    anything on a cycle that was always going to fail.
+
+    Both directions are checked (`out_dir` inside `workspace`, or the
+    reverse) and exact equality too; `workspace is None` (no recorded cwd)
+    is not this function's problem -- the later `workspace.is_dir()` check
+    covers that."""
+    if workspace is None:
+        return
+    workspace = Path(workspace).resolve()
+    out_dir = Path(out_dir).resolve()
+    nested = (out_dir == workspace or workspace in out_dir.parents
+             or out_dir in workspace.parents)
+    if nested:
+        raise SystemExit(
+            f"error: --out ({out_dir}) and the trace's recorded workspace "
+            f"({workspace}) are nested inside each other. Replaying copies "
+            "the workspace into a directory under --out for every run; a "
+            "nested --out would copy that destination into itself and "
+            "every run would fail. Pass an --out path outside the "
+            "workspace (e.g. a sibling directory, or outside the repo "
+            "entirely)."
+        )
+
+
 def _check_budget(estimate, budget_usd):
     if budget_usd is None:
         return
@@ -609,6 +658,72 @@ def _session_info(trace, prompt, trace_path):
         "prompt": prompt,
         "trace_file": str(trace_path),
     }
+
+
+# Which of the ten EFFICIENCY_METRICS (types.py) are driven by grok's own
+# token/cost accounting -- and therefore carry prompt-cache-warmth noise --
+# versus counted straight off the trace/harness, independent of cache
+# state. Only the metrics explicitly classified (7 of 10) appear here;
+# `wall_ms`, `tool_result_tokens_est`, and `mcp_startup_ms` are
+# deliberately left out rather than guessed at -- report.py's renderer
+# should treat a metric with no entry as unclassified, not as "confirmed
+# not cache-sensitive".
+CACHE_SENSITIVE_METRICS = {
+    "total_tokens": True,
+    "cost_usd": True,
+    "skill_tokens_est": False,
+    "skill_wasted_tokens_est": False,
+    "tool_calls": False,
+    "turns": False,
+    "duplicate_calls": False,
+}
+
+
+def _cache_read_range(patch_results):
+    """(min, max) of `usage.cache_read_input_tokens` observed across every
+    run in every patch's matrix this cycle -- real numbers, never a canned
+    figure, so `_cache_warmth_caveat` can state THIS cycle's actual spread
+    rather than repeating someone else's. None when no run has usage data
+    to draw a range from (e.g. every run failed before grok reported
+    usage)."""
+    values = []
+    for pr in patch_results:
+        for runs in ((pr.get("matrix") or {}).get("arms") or {}).values():
+            for r in runs:
+                v = (r.get("usage") or {}).get("cache_read_input_tokens")
+                if v is not None:
+                    values.append(v)
+    if not values:
+        return None
+    return min(values), max(values)
+
+
+def _cache_warmth_caveat(patch_results):
+    """Prompt-cache state (how much of the prompt was served from cache vs.
+    recomputed) is a function of run history and timing, not of the
+    harness -- interleaved dispatch (replay.run_matrix's control/treatment
+    interleaving) helps but does not eliminate it. `total_tokens` and
+    `cost_usd` are both read straight off grok's own token/cost accounting
+    (types.make_run_result's `usage`/`cost_usd`), which is exactly what
+    `cache_read_input_tokens` swings move -- so both carry this noise. The
+    deterministic metrics (skill tokens loaded, tool calls, turns, ...) are
+    counted off the trace/harness directly, not derived from token
+    accounting, so they are not cache-sensitive. Returns None (caveat
+    omitted, not a fabricated generic warning) when this cycle has no
+    usage data to show a real range from."""
+    cache_range = _cache_read_range(patch_results)
+    if cache_range is None:
+        return None
+    lo, hi = cache_range
+    return (
+        "Token and cost figures are affected by prompt-cache warmth, which "
+        "varies per run independently of the harness (this cycle observed "
+        f"cache_read_input_tokens ranging {lo:,} to {hi:,} across runs). "
+        "Medians are reported to blunt this, but cost_usd in particular "
+        "should be read as indicative, not as a measurement of the patch. "
+        "The deterministic metrics -- skill tokens loaded, tool calls, "
+        "turns -- are not cache-sensitive."
+    )
 
 
 def _base_extra_caveats(trace, baseline_source, baseline_version, estimate,
@@ -1007,6 +1122,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             baseline_version=_baseline_summary(baseline_version),
             patch_results=[], k=k, cost_usd=0.0,
             extra_caveats=_base_extra_caveats(trace, *caveats_args))
+        rpt["cache_sensitive_metrics"] = CACHE_SENSITIVE_METRICS
         report.write(rpt, out_dir)
         print("=== cycle done: no appliable candidate patches this cycle ===")
         print(f"report: {out_dir / 'index.html'}")
@@ -1139,11 +1255,17 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
         state["updated_at"] = now().isoformat()
         _write_json(progress_path, state)
 
+    extra_caveats = _base_extra_caveats(trace, *caveats_args)
+    cache_caveat = _cache_warmth_caveat(patch_results)
+    if cache_caveat:
+        extra_caveats = extra_caveats + [cache_caveat]
+
     rpt = report.build(
         session=_session_info(trace, prompt, trace_path),
         baseline_version=_baseline_summary(baseline_version),
         patch_results=patch_results, k=k, cost_usd=total_cost,
-        extra_caveats=_base_extra_caveats(trace, *caveats_args))
+        extra_caveats=extra_caveats)
+    rpt["cache_sensitive_metrics"] = CACHE_SENSITIVE_METRICS
     report.write(rpt, out_dir)
     _print_cycle_summary(rpt, out_dir, total_cost)
 

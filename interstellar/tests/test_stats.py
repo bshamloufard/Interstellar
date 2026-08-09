@@ -940,6 +940,7 @@ class GateTest(unittest.TestCase):
             "accepted": False,
             "provisional": False,
             "directional": "unknown",
+            "quality_evidence": "none",
             "reasons": [
                 "no successful paired runs: 0 of 3 runs produced usable data",
                 "control failed 3/3, treatment failed 3/3",
@@ -996,7 +997,84 @@ class GateTest(unittest.TestCase):
         r = stats.gate(s)
         self.assertFalse(r["accepted"])
         self.assertEqual(r["directional"], "favorable")
+        self.assertEqual(r["quality_evidence"], "decided")  # a real win, not a tie
         self.assertTrue(any("insufficient_samples_for_acceptance" in reason for reason in r["reasons"]))
+
+    # --- fix-round-4 review, Important I2: a "favorable" directional
+    # reading backed by zero decided quality evidence must be distinguishable
+    # from one backed by real wins/losses -- both via a companion field and
+    # an explicit reasons line, so a reader can't mistake "efficiency alone
+    # had an opinion" for "quality held and efficiency improved". ---
+
+    def test_reported_scenario_one_tie_zero_decided_flags_efficiency_alone(self):
+        # The exact dashboard case: win_rate={wins:0, ties:1, losses:0, n:1}
+        # -- one judged pair, a tie, and nothing else. A real efficiency
+        # improvement alone must not render as unqualified "favorable".
+        s = {
+            "win_rate": _win_rate_stub(1, wins=0, losses=0, ties=1),
+            "regressions": [],
+            "efficiency": _efficiency_stub(n=1, mean=470.0, lo=None, hi=None),  # a real improvement
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertEqual(r["directional"], "favorable")  # the efficiency evidence is real, not discarded
+        self.assertEqual(r["quality_evidence"], "ties_only")
+        self.assertTrue(any(
+            'directional reading ("favorable") rests on efficiency alone' in reason
+            and "all ties" in reason
+            for reason in r["reasons"]
+        ))
+
+    def test_quality_evidence_none_when_zero_judged_pairs(self):
+        s = {
+            "win_rate": _win_rate_stub(0, wins=0, losses=0, ties=0),
+            "regressions": [],
+            "efficiency": _efficiency_stub(n=1, mean=470.0, lo=None, hi=None),
+            "primary_effect": EFFECT_WALL_MS,
+            "data": {"pairs_total": 1, "pairs_usable": 1,  # usable but somehow unjudged (hand-built)
+                     "control_failures": 0, "treatment_failures": 0},
+        }
+        r = stats.gate(s)
+        self.assertEqual(r["directional"], "favorable")
+        self.assertEqual(r["quality_evidence"], "none")
+        self.assertTrue(any("no judged quality pairs at all" in reason for reason in r["reasons"]))
+
+    def test_quality_evidence_decided_no_caveat_at_full_n(self):
+        # The ordinary, fully-corroborated case must NOT get the efficiency-
+        # alone caveat -- real wins back the favorable reading.
+        s = {
+            "win_rate": _win_rate_stub(12, wins=10, losses=0, ties=2),
+            "regressions": [],
+            "efficiency": _efficiency_stub(),
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertEqual(r["directional"], "favorable")
+        self.assertEqual(r["quality_evidence"], "decided")
+        self.assertFalse(any("rests on efficiency alone" in reason for reason in r["reasons"]))
+
+    def test_quality_evidence_ties_only_with_unfavorable_efficiency_also_flagged(self):
+        # The caveat applies to "unfavorable" too, not just "favorable" --
+        # an efficiency-alone regression reading needs the same honesty.
+        s = {
+            "win_rate": _win_rate_stub(6, wins=0, losses=0, ties=6),
+            "regressions": [],
+            "efficiency": _efficiency_stub(n=6, mean=-50.0, lo=None, hi=None),
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertEqual(r["directional"], "unfavorable")
+        self.assertEqual(r["quality_evidence"], "ties_only")
+        self.assertTrue(any(
+            'directional reading ("unfavorable") rests on efficiency alone' in reason
+            for reason in r["reasons"]
+        ))
+
+    def test_no_data_short_circuit_quality_evidence_is_none(self):
+        grades = [_summarize_grade(i, control_ok=False, treatment_ok=False) for i in range(3)]
+        summary = stats.summarize(grades, primary_effect=EFFECT_WALL_MS, seed=0)
+        r = stats.gate(summary)
+        self.assertEqual(r["quality_evidence"], "none")
 
 
 if __name__ == "__main__":

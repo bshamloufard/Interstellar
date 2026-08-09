@@ -337,7 +337,10 @@ class FailureModeTests(unittest.TestCase):
 class IsolatedWorkdirTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        # isolated_workdir resolves both src and dest; resolve here too so
+        # string/path comparisons below don't trip on e.g. macOS's /var ->
+        # /private/var symlink, which .resolve() collapses.
+        self.root = Path(self.tmp.name).resolve()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -395,6 +398,59 @@ class IsolatedWorkdirTests(unittest.TestCase):
         self.assertTrue((dest / "keep.py").exists())
         self.assertFalse((dest / ".git").exists())
         self.assertFalse((dest / "target").exists())
+
+    def test_dest_inside_src_terminates_and_excludes_itself(self):
+        # Final review C1: the documented default puts the cycle's own
+        # output (--out) inside `workspace`, so `dest` is routinely a
+        # descendant of `src`. An unconditional copytree recurses into its
+        # own destination and copies it into itself until it dies on path
+        # length -- reproduced here with the same shape as the real bug
+        # (dest several directories deep under src, alongside a sibling
+        # run's directory and ordinary source content).
+        src = self.root / "workspace"
+        src.mkdir()
+        (src / "keep.py").write_text("keep\n")
+        (src / "untracked.py").write_text("untracked\n")
+        # A sibling run's own output, already sitting under the same
+        # ancestor as `dest` -- must not be swept into this run's copy.
+        sibling = src / "runs" / "ts1" / "scratch" / "p1" / "runs" / "treatment-0-workdir"
+        sibling.mkdir(parents=True)
+        (sibling / "leftover.txt").write_text("stale\n")
+        dest = src / "runs" / "ts1" / "scratch" / "p1" / "runs" / "control-0-workdir"
+
+        out = isolated_workdir(src, dest)
+
+        self.assertEqual(out, dest)
+        # Terminated (a broken implementation raises OSError from a path
+        # that grows without bound long before reaching here) and excluded
+        # itself: the copy must not contain a `runs/` subtree at all, since
+        # `runs/` is entirely the ancestor branch that led to `dest`.
+        self.assertFalse((dest / "runs").exists())
+        # Preserved: an untracked file and ordinary source content, exactly
+        # the property Important D's fix already established for git state.
+        self.assertEqual((dest / "keep.py").read_text(), "keep\n")
+        self.assertEqual((dest / "untracked.py").read_text(), "untracked\n")
+
+    def test_dest_equal_to_src_raises(self):
+        src = self.root / "workspace"
+        src.mkdir()
+
+        with self.assertRaises(ValueError):
+            isolated_workdir(src, src)
+
+    def test_src_inside_dest_raises_instead_of_deleting_src(self):
+        # dest being an ancestor of src is unsafe for a different reason:
+        # the pre-copy `rmtree(dest)` would delete `src` along with it.
+        dest = self.root / "outer"
+        src = dest / "workspace"
+        src.mkdir(parents=True)
+        (src / "keep.py").write_text("keep\n")
+
+        with self.assertRaises(ValueError):
+            isolated_workdir(src, dest)
+        # And, critically, src must still be there -- the guard has to fire
+        # before any destructive step, not after.
+        self.assertTrue((src / "keep.py").exists())
 
 
 class RunMatrixTests(unittest.TestCase):

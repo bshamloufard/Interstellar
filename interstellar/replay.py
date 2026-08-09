@@ -194,8 +194,41 @@ def run_once(prompt, home: Path, *, workdir: Path, timeout=600, model=None,
 # `.git` is never useful inside a replay workdir; the rest are large,
 # regenerable directories that would make every run pay a real copy cost
 # (and, for `target/`, a very large one in this repo) for no benefit.
-_COPY_IGNORE = shutil.ignore_patterns(".git", "target", "node_modules",
-                                      "__pycache__", ".venv")
+# Excluded only at the top level of `src` (see `_make_ignore`) -- matching
+# by basename anywhere in the tree would also skip an unrelated,
+# legitimately-named directory deeper down.
+_TOP_LEVEL_IGNORE_NAMES = frozenset({".git", "target", "node_modules",
+                                     "__pycache__", ".venv"})
+
+
+def _make_ignore(src: Path, dest: Path):
+    """Build the `shutil.copytree` ignore callable for one `isolated_workdir`
+    call. Path-based, not name-based: it excludes `dest` itself, and any
+    directory that *contains* `dest`, wherever encountered while walking
+    `src`. `dest` is commonly inside `src` -- the cycle's own output
+    directory defaults to `<workspace>/runs/<ts>/...`, so `scratch` (and
+    every sibling run's home/workdir under it) typically lives inside the
+    very workspace being copied. Skipping the topmost containing directory
+    (not just `dest` itself) both prevents copytree from recursing into its
+    own destination -- which would otherwise copy it into itself until it
+    dies on path length -- and, as a side effect, keeps every other run's
+    already-materialized output out of this run's copy instead of paying a
+    real, unbounded copy cost for it on every one of the 2*k runs.
+    """
+    dest_may_be_inside_src = dest.is_relative_to(src)
+
+    def _ignore(dirpath, names):
+        dirpath = Path(dirpath).resolve()
+        skip = set()
+        if dirpath == src:
+            skip |= _TOP_LEVEL_IGNORE_NAMES & set(names)
+        if dest_may_be_inside_src:
+            for name in names:
+                if dest.is_relative_to((dirpath / name).resolve()):
+                    skip.add(name)
+        return skip
+
+    return _ignore
 
 
 def isolated_workdir(src: Path, dest: Path) -> Path:
@@ -211,12 +244,27 @@ def isolated_workdir(src: Path, dest: Path) -> Path:
     written into the user's real repo (no `.git/worktrees/` registration to
     forget to clean up) and two invocations of the same command behave
     identically regardless of git state.
+
+    `src` and `dest` are resolved to absolute paths up front, and the copy's
+    ignore predicate is path-aware (see `_make_ignore`) so that `dest` being
+    a descendant of `src` -- the documented default, since `--out` lives
+    inside `workspace` unless told otherwise -- does not make copytree walk
+    into its own output. `dest == src`, or `src` nested inside `dest` (which
+    would make the pre-copy `rmtree(dest)` below delete `src`), cannot be
+    made safe by excluding anything and are refused outright rather than
+    silently producing an empty or destroyed workdir.
     """
-    src, dest = Path(src), Path(dest)
+    src = Path(src).resolve()
+    dest = Path(dest).resolve()
+    if dest == src or src.is_relative_to(dest):
+        raise ValueError(
+            f"isolated_workdir: dest ({dest}) is src itself, or an ancestor "
+            f"of src ({src}) -- cannot be safely excluded from the copy")
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(src, dest, ignore=_COPY_IGNORE)
+    shutil.copytree(src, dest, ignore=_make_ignore(src, dest))
     return dest
 
 

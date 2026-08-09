@@ -1251,6 +1251,11 @@ table.metrics tr.good td:nth-child(4), table.metrics tr.good td:nth-child(5) { c
 table.metrics tr.bad td:nth-child(4), table.metrics tr.bad td:nth-child(5) { color: var(--bad); }
 table.metrics tr.hl { background: var(--accent-dim); }
 .tag { font-size: 9px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 0.3rem; margin-left: 0.3rem; text-transform: uppercase; }
+/* Flags a metric that swings with prompt-cache warmth (run history/timing)
+   rather than only with the patch -- amber, distinct from the accent-blue
+   "target" tag, so the two never look like the same kind of claim. */
+.tag.cache-tag { color: var(--warn); border-color: var(--warn); cursor: help; }
+.cache-legend { font-size: 11px; margin: 0.35rem 0 0; }
 
 .wtl-bar { display: flex; height: 14px; border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
 .wtl-seg { height: 100%; }
