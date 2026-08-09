@@ -454,10 +454,14 @@ class SummarizeTest(unittest.TestCase):
 
         self.assertEqual(
             set(summary),
-            {"n", "win_rate", "permutation", "efficiency", "pass_k",
+            {"n", "data", "win_rate", "permutation", "efficiency", "pass_k",
              "regressions", "judge_consistency", "primary_effect"},
         )
-        self.assertEqual(summary["n"], 3)
+        self.assertEqual(summary["n"], 3)  # all 3 grades usable (both arms ok)
+        self.assertEqual(summary["data"], {
+            "pairs_total": 3, "pairs_usable": 3,
+            "control_failures": 0, "treatment_failures": 0,
+        })
         self.assertEqual(summary["primary_effect"], EFFECT_WALL_MS)
 
         self.assertEqual(summary["win_rate"], stats.win_rate(grades, seed=0))
@@ -477,6 +481,47 @@ class SummarizeTest(unittest.TestCase):
     def test_unknown_effect_raises_key_error(self):
         with self.assertRaises(KeyError):
             stats.summarize([], primary_effect="not_a_real_effect")
+
+    # --- fix-round-3 review, Critical: run health must be visible, not
+    # silently folded into a shrunk "n". ---
+
+    def test_data_block_on_all_runs_ok(self):
+        grades = [_summarize_grade(i, wall_ms_control=100, wall_ms_treatment=90,
+                                    verdict=ARM_TREATMENT) for i in range(3)]
+        summary = stats.summarize(grades, primary_effect=EFFECT_WALL_MS, seed=0)
+        self.assertEqual(summary["data"], {
+            "pairs_total": 3, "pairs_usable": 3,
+            "control_failures": 0, "treatment_failures": 0,
+        })
+        self.assertEqual(summary["n"], 3)
+
+    def test_partial_failure_shrinks_n_visibly(self):
+        # 1 of 3 usable -- n must reflect that (not len(grades)=3), and the
+        # data block must show exactly what happened to the other 2.
+        grades = [
+            _summarize_grade(0, wall_ms_control=100, wall_ms_treatment=90, verdict=ARM_TREATMENT),
+            _summarize_grade(1, control_ok=False, treatment_ok=True),
+            _summarize_grade(2, control_ok=True, treatment_ok=False),
+        ]
+        summary = stats.summarize(grades, primary_effect=EFFECT_WALL_MS, seed=0)
+        self.assertEqual(summary["n"], 1)
+        self.assertEqual(summary["data"], {
+            "pairs_total": 3, "pairs_usable": 1,
+            "control_failures": 1, "treatment_failures": 1,
+        })
+
+    def test_all_runs_failed_zero_usable_pairs(self):
+        grades = [
+            _summarize_grade(0, control_ok=False, treatment_ok=False),
+            _summarize_grade(1, control_ok=False, treatment_ok=False),
+            _summarize_grade(2, control_ok=False, treatment_ok=True),
+        ]
+        summary = stats.summarize(grades, primary_effect=EFFECT_WALL_MS, seed=0)
+        self.assertEqual(summary["n"], 0)
+        self.assertEqual(summary["data"], {
+            "pairs_total": 3, "pairs_usable": 0,
+            "control_failures": 3, "treatment_failures": 2,
+        })
 
     def test_pass_k_uses_treatment_ok_not_control_ok(self):
         grades = [
@@ -875,6 +920,83 @@ class GateTest(unittest.TestCase):
         r = stats.gate(s)
         self.assertFalse(r["accepted"])
         self.assertTrue(any("missing sample size" in reason for reason in r["reasons"]))
+
+    # --- fix-round-3 review, Critical: an all-failed cycle must render as
+    # its own "unknown" state, never as "provisional, neutral" (which
+    # reads as a measured null result). ---
+
+    def test_no_data_short_circuit_via_real_summarize(self):
+        # The exact reported scenario: every one of k=3 paired runs failed
+        # (a transient auth failure), reproduced end to end through the
+        # real summarize() -> gate() call, not a hand-typed stub.
+        grades = [
+            _summarize_grade(0, control_ok=False, treatment_ok=False),
+            _summarize_grade(1, control_ok=False, treatment_ok=False),
+            _summarize_grade(2, control_ok=False, treatment_ok=False),
+        ]
+        summary = stats.summarize(grades, primary_effect=EFFECT_WALL_MS, seed=0)
+        r = stats.gate(summary)
+        self.assertEqual(r, {
+            "accepted": False,
+            "provisional": False,
+            "directional": "unknown",
+            "reasons": [
+                "no successful paired runs: 0 of 3 runs produced usable data",
+                "control failed 3/3, treatment failed 3/3",
+            ],
+        })
+
+    def test_no_data_short_circuit_mixed_failure_counts(self):
+        grades = [
+            _summarize_grade(0, control_ok=False, treatment_ok=True),
+            _summarize_grade(1, control_ok=True, treatment_ok=False),
+        ]
+        summary = stats.summarize(grades, primary_effect=EFFECT_WALL_MS, seed=0)
+        r = stats.gate(summary)
+        self.assertFalse(r["accepted"])
+        self.assertFalse(r["provisional"])
+        self.assertEqual(r["directional"], "unknown")
+        self.assertTrue(any("control failed 1/2, treatment failed 1/2" in reason
+                             for reason in r["reasons"]))
+
+    def test_no_data_short_circuit_never_reads_neutral(self):
+        # The specific regression: this must NOT come back
+        # provisional=True, directional="neutral" -- that phrasing implies
+        # a measured null result, which this is not.
+        grades = [_summarize_grade(i, control_ok=False, treatment_ok=False) for i in range(3)]
+        summary = stats.summarize(grades, primary_effect=EFFECT_WALL_MS, seed=0)
+        r = stats.gate(summary)
+        self.assertNotEqual(r["directional"], "neutral")
+        self.assertFalse(r["provisional"])
+
+    def test_no_data_short_circuit_falls_back_without_data_block(self):
+        # A hand-assembled (pre-fix-round-3) summary with no "data" key at
+        # all must still be caught, via win_rate's own n as a fallback.
+        s = {
+            "win_rate": _win_rate_stub(0, wins=0, losses=0, ties=0),
+            "regressions": [],
+            "efficiency": _efficiency_stub(),
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertFalse(r["accepted"])
+        self.assertEqual(r["directional"], "unknown")
+
+    def test_single_usable_pair_does_not_trigger_no_data_short_circuit(self):
+        # 1 usable pair is NOT the no-data state -- it falls through to the
+        # ordinary (n<5, always-reject) path with a real directional reading.
+        s = {
+            "win_rate": _win_rate_stub(1, wins=1, losses=0, ties=0),
+            "regressions": [],
+            "efficiency": _efficiency_stub(n=1, mean=30.0, lo=None, hi=None),
+            "primary_effect": EFFECT_WALL_MS,
+            "data": {"pairs_total": 3, "pairs_usable": 1,
+                     "control_failures": 1, "treatment_failures": 1},
+        }
+        r = stats.gate(s)
+        self.assertFalse(r["accepted"])
+        self.assertEqual(r["directional"], "favorable")
+        self.assertTrue(any("insufficient_samples_for_acceptance" in reason for reason in r["reasons"]))
 
 
 if __name__ == "__main__":

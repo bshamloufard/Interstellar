@@ -9,6 +9,7 @@ instead.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -81,6 +82,11 @@ class RunOnceArgvEnvTests(unittest.TestCase):
         self.workdir = Path(self.tmp.name) / "work"
         self.home.mkdir()
         self.workdir.mkdir()
+        # run_once resolves both before use (fix round 3); resolve here too
+        # so string comparisons below don't trip on e.g. macOS's /var ->
+        # /private/var symlink, which .resolve() collapses.
+        self.home = self.home.resolve()
+        self.workdir = self.workdir.resolve()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -113,6 +119,36 @@ class RunOnceArgvEnvTests(unittest.TestCase):
         self.assertEqual(result["session_id"], "sess-1")
         self.assertEqual(result["home"], str(self.home))
         self.assertEqual(result["workdir"], str(self.workdir))
+
+    def test_home_and_workdir_resolved_to_absolute_even_when_given_relative(self):
+        # Fix round 3: grok resolves a relative GROK_HOME against its own
+        # cwd (the workdir passed via cwd=), not the caller's -- a relative
+        # `home` sent grok looking in the wrong place entirely, finding
+        # nothing, and reporting itself signed out. Every run in a live
+        # 18-run cycle failed exactly this way.
+        rel_home = Path(os.path.relpath(self.home, Path.cwd()))
+        rel_workdir = Path(os.path.relpath(self.workdir, Path.cwd()))
+        self.assertFalse(rel_home.is_absolute())
+        self.assertFalse(rel_workdir.is_absolute())
+
+        captured = {}
+
+        def fake_runner(argv, **kwargs):
+            captured["kwargs"] = kwargs
+            return _ok_run(argv, kwargs)
+
+        result = run_once("p", rel_home, workdir=rel_workdir, runner=fake_runner)
+
+        grok_home = captured["kwargs"]["env"]["GROK_HOME"]
+        cwd = captured["kwargs"]["cwd"]
+        self.assertTrue(Path(grok_home).is_absolute(), grok_home)
+        self.assertTrue(Path(cwd).is_absolute(), cwd)
+        self.assertEqual(grok_home, str(self.home))
+        self.assertEqual(cwd, str(self.workdir))
+        # Also true of what lands on the RunResult -- a relative path there
+        # is useless to a reader whose cwd is not the runner's.
+        self.assertTrue(Path(result["home"]).is_absolute())
+        self.assertTrue(Path(result["workdir"]).is_absolute())
 
     def test_model_and_extra_rules_forwarded(self):
         captured = {}
@@ -539,6 +575,34 @@ class RunMatrixTests(unittest.TestCase):
             self.assertTrue(call["grok_rules_present"])
             # project_dest really is the (rest of the) workspace copy.
             self.assertTrue((call["project_dest"] / "app.py").exists())
+
+    def test_grok_home_and_cwd_absolute_even_with_relative_scratch_and_workspace(self):
+        # Fix round 3, reproduced at the run_matrix level: this is the exact
+        # case that broke a live cycle -- scratch/workspace given as
+        # relative paths, which used to flow straight through into a
+        # relative GROK_HOME.
+        rel_scratch = Path(os.path.relpath(self.scratch, Path.cwd()))
+        rel_workspace = Path(os.path.relpath(self.workspace, Path.cwd()))
+        self.assertFalse(rel_scratch.is_absolute())
+        self.assertFalse(rel_workspace.is_absolute())
+
+        captured = []
+
+        def fake_runner(argv, **kwargs):
+            captured.append(kwargs)
+            return _ok_run(argv, kwargs)
+
+        run_matrix(
+            "prompt", control=self.control, treatment=self.treatment,
+            k=1, workspace=rel_workspace, scratch=rel_scratch,
+            auth_from=self.auth_from, max_parallel=1,
+            runner=fake_runner, materialize=self._fake_materialize,
+        )
+
+        self.assertEqual(len(captured), 2)
+        for kwargs in captured:
+            self.assertTrue(Path(kwargs["env"]["GROK_HOME"]).is_absolute())
+            self.assertTrue(Path(kwargs["cwd"]).is_absolute())
 
     def test_dispatch_order_is_interleaved(self):
         # A single worker dequeues submitted tasks strictly FIFO, so with

@@ -623,9 +623,10 @@ def _matrix_summary_line(matrix):
 
 def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=None):
     """The badge is the one thing a scanning reader actually reads, so it
-    must never be able to say something that isn't true. Three checks run
-    BEFORE the gate is even consulted, in this order, because each one
-    contradicts what the gate alone would otherwise imply:
+    must never be able to say something that isn't true. Four checks run
+    BEFORE the ordinary gate table is even consulted, in this order,
+    because each one contradicts what that table alone would otherwise
+    imply:
 
     1. `not applied` -- nothing was ever measured. `stats.gate()` doesn't
        know a patch never ran; cli.py's not-applied gate result still sets
@@ -639,11 +640,19 @@ def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=Non
        and the efficiency point estimate alone (see `_directional` in
        stats.py), which never looks at `regressions` -- so a treatment that
        won every judged pair right up until it crashed on one repeat can
-       score PROVISIONAL/DIRECTIONAL · FAVORABLE. The team-lead is
-       separately having stats.py stop doing this, but this module does
-       not rely on that alone: a high-severity regression forces REGRESSED
-       here regardless of what accepted/provisional/directional say.
-    3. Zero decided pairs backing an ACCEPTED -- `stats.gate()`'s n>=10
+       score PROVISIONAL/DIRECTIONAL · FAVORABLE. stats.py separately
+       forces its own override for this, but this module does not rely on
+       that alone: a high-severity regression forces REGRESSED here
+       regardless of what accepted/provisional/directional say.
+    3. `directional == "unknown"` -- stats.gate()'s zero-usable-pairs
+       short-circuit (every run in the cycle failed on at least one arm):
+       accepted/provisional are already False there, but a bare REJECTED
+       would still read as "we measured this and it lost" exactly like the
+       not-applied case above -- the truth is "nothing could be measured,"
+       distinct from both "never applied" (NOT RUN) and "measured and came
+       out even" (`directional == "neutral"`, a real reading). NO DATA,
+       same neutral gray family as NOT RUN, not a reject color.
+    4. Zero decided pairs backing an ACCEPTED -- `stats.gate()`'s n>=10
        quality check passes on `losses == 0`, which an all-ties result
        (0 wins, 0 losses) satisfies with no quality evidence at all. A
        green ACCEPTED there is technically the gate's own call but is
@@ -652,7 +661,7 @@ def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=Non
        weight of ACCEPTED · PROVISIONAL, so it cannot be mistaken for the
        same claim as a real win.
 
-    Only past all three does the five-state truth table apply -- see the
+    Only past all four does the five-state truth table apply -- see the
     inline states below. Falls back to a legacy REJECT only for a gate
     dict that predates the provisional/directional fields entirely.
     """
@@ -661,6 +670,8 @@ def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=Non
     if high_severity_regressions:
         n = high_severity_regressions
         return f'<span class="badge regressed">REGRESSED &middot; {n} HIGH-SEVERITY</span>'
+    if gate.get("directional") == "unknown":
+        return '<span class="badge no-data">NO DATA</span>'
 
     accepted = bool(gate.get("accepted"))
     provisional = bool(gate.get("provisional"))
@@ -775,7 +786,21 @@ def _patch_card(pr, idx, extra_caveats=None):
     meta_bits = [f"expects to move <strong>{_esc(expected_effect)}</strong>"]
     if source_rec:
         meta_bits.append(f"from recommendation <em>{_esc(source_rec)}</em>")
-    if stats.get("n") is not None:
+    # statistics["n"] means usable pairs (both arms succeeded), not total
+    # repeats attempted. A partial failure must stay visible as "1 of 3
+    # usable" rather than silently reporting n=1 with no context for where
+    # the other 2 went -- see statistics["data"] (pairs_total/pairs_usable/
+    # control_failures/treatment_failures). Falls back to the bare n when
+    # a statistics dict predates the "data" block.
+    data = stats.get("data") or {}
+    pairs_total, pairs_usable = data.get("pairs_total"), data.get("pairs_usable")
+    if pairs_total is not None and pairs_usable is not None and pairs_total != pairs_usable:
+        meta_bits.append(
+            f"{_esc(pairs_usable)} of {_esc(pairs_total)} paired repeats usable "
+            f"(control failed {_esc(data.get('control_failures', 0))}, "
+            f"treatment failed {_esc(data.get('treatment_failures', 0))})"
+        )
+    elif stats.get("n") is not None:
         meta_bits.append(f"{_esc(stats.get('n'))} paired repeats run")
     if matrix_line:
         meta_bits.append(_esc(matrix_line))
@@ -1147,6 +1172,11 @@ ul.patch-caveats li::before { content: "\26A0  "; color: var(--warn); }
    a distinct neutral state ("we couldn't even build it to measure"). This
    check runs before the gate is even consulted (see _gate_badge). */
 .badge.not-run { color: var(--not-run); border-color: var(--not-run); background: var(--not-run-dim); }
+/* stats.gate()'s zero-usable-pairs short-circuit (directional=="unknown"):
+   every run failed on at least one arm, so nothing could be measured --
+   the same neutral family as NOT RUN (not a reject color), but a distinct
+   state: the patch DID apply, it just never produced usable data. */
+.badge.no-data { color: var(--not-run); border-color: var(--not-run); background: var(--not-run-dim); }
 /* A high-severity regression overrides whatever accepted/provisional/
    directional say -- the gate alone can't see it (see _gate_badge) and
    this must never render as favorable-looking. */

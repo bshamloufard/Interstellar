@@ -548,10 +548,24 @@ def summarize(grades, *, primary_effect, seed=DEFAULT_SEED):
 
     Returns:
       {
-        "n": len(grades),   -- the paired replay count k (total repeats).
-             NOT the same as win_rate's own "n" (judged pairs), which can
-             be smaller when a run failed and grade.py skipped the judge --
-             use summary["win_rate"]["n"] for the quality sample size.
+        "n": count of USABLE pairs (both control_ok and treatment_ok) --
+             NOT len(grades). A grade where either arm failed to even run
+             carries no comparison, so it must not silently inflate the
+             sample size the rest of this dict claims to have (fix-round-3
+             review: "if only 1 of 3 pairs is usable, that must be visible
+             rather than silently shrinking n" -- shrinking IS correct
+             here, silence is the bug). In the standard pipeline this
+             coincides with win_rate's own "n" (grade.py only calls
+             judge_pair when both arms succeeded), but is computed
+             independently here so a hand-assembled summary without a
+             judge verdict still reports a correct pair count.
+        "data": {"pairs_total": len(grades), "pairs_usable": <see n above>,
+             "control_failures": <count where control_ok is False>,
+             "treatment_failures": <count where treatment_ok is False>} --
+             so the report/CLI can see run health directly instead of
+             re-deriving it from `grades`, and so a fully-failed cycle
+             (pairs_usable == 0) is a visible fact, not an inference left
+             to the reader (fix-round-3 review, Critical -- see `gate`).
         "win_rate": win_rate(grades, seed=seed),
         "permutation": permutation_test(<primary_effect's paired deltas>, seed=seed),
              -- the primary small-n inferential test (research-methods.md
@@ -593,8 +607,26 @@ def summarize(grades, *, primary_effect, seed=DEFAULT_SEED):
     treatment_outcomes = [g.get("treatment_ok", _unset) for g in grades]
     treatment_outcomes = [v for v in treatment_outcomes if v is not _unset]
 
+    # Missing "control_ok"/"treatment_ok" defaults to NOT-ok, not ok --
+    # same "a missing measurement must never default to optimistic"
+    # principle as pass_k's fix above; only reachable via a hand-assembled
+    # grade dict, since types.make_grade always sets both keys.
+    pairs_total = len(grades)
+    control_failures = sum(1 for g in grades if not g.get("control_ok", False))
+    treatment_failures = sum(1 for g in grades if not g.get("treatment_ok", False))
+    pairs_usable = sum(
+        1 for g in grades if g.get("control_ok", False) and g.get("treatment_ok", False)
+    )
+    data = {
+        "pairs_total": pairs_total,
+        "pairs_usable": pairs_usable,
+        "control_failures": control_failures,
+        "treatment_failures": treatment_failures,
+    }
+
     return {
-        "n": len(grades),
+        "n": pairs_usable,
+        "data": data,
         "win_rate": win_rate(grades, seed=seed),
         "permutation": permutation_test(primary_deltas, seed=seed),
         "efficiency": efficiency_deltas(grades, seed=seed),
@@ -676,6 +708,21 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
     `summarize` was built with. It is mapped to an EFFICIENCY_METRICS name
     via EFFECT_TO_EFFICIENCY_METRIC, same as `summarize`.
 
+    No-data short-circuit, checked FIRST, before any other check runs
+    (fix-round-3 review, Critical): if `summary["data"]["pairs_usable"]` is
+    0 -- every run in the cycle failed on at least one arm, so there is no
+    paired comparison anywhere -- this returns immediately with
+    `accepted=False, provisional=False, directional="unknown"` and reasons
+    naming the failure counts per arm. This is a DIFFERENT state from a
+    measured null result: "neutral" means "we measured this and the two
+    arms came out even"; "unknown" means "we measured nothing." Before
+    this fix, a fully-failed cycle fell through to the ordinary n<5 branch
+    and came back `provisional=True, directional="neutral"` -- indistinguishable
+    from weak evidence of no effect, when the truth is zero evidence of
+    anything. Falls back to `win_rate`'s own judged-pair count when
+    `summary` has no "data" key (a hand-assembled or pre-fix-round-3
+    summary), since the two coincide in the standard pipeline.
+
     Quality check, keyed on n = win_rate's judged-pair count:
       n < MIN_SAMPLES_FOR_ACCEPT (5)
           -> accepted forced False, reason "insufficient_samples_for_acceptance".
@@ -733,12 +780,16 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
                     when a high-severity regression is present (see
                     above). An accepted:True result with provisional:True should
                     render as a qualified verdict, not a clean pass.
-      directional - "favorable" | "unfavorable" | "neutral": what the
-                    evidence points toward regardless of whether accepted
-                    is True -- always populated, including at n < 5 where
-                    acceptance is impossible by construction, so the report
-                    always has something better to show than a bare "no".
-                    Forced to "unfavorable" by a high-severity regression.
+      directional - "favorable" | "unfavorable" | "neutral" | "unknown":
+                    what the evidence points toward regardless of whether
+                    accepted is True -- always populated, including at
+                    n < 5 where acceptance is impossible by construction,
+                    so the report always has something better to show than
+                    a bare "no". Forced to "unfavorable" by a high-severity
+                    regression, or to "unknown" (see above) when zero pairs
+                    were usable at all -- "neutral" is reserved for an
+                    actual measured null result and must never stand in
+                    for "nothing ran".
       reasons     - list[str], one per check, for both accept and reject,
                     so the report can always explain itself. Includes two
                     informational lines (judge position-consistency, the
@@ -748,6 +799,41 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
                     pinned accept criteria, but both are cheap context a
                     reader needs to calibrate the rest of the reasons.
     """
+    wr = summary.get("win_rate") or {}
+
+    # --- no-data short-circuit (fix-round-3 review, Critical): every run
+    # in the cycle failed on at least one arm, so nothing was measured at
+    # all. Must not fall through to the ordinary small-n path, which would
+    # otherwise report this as "provisional, neutral" -- indistinguishable
+    # from a real (if underpowered) null result. ---
+    data = summary.get("data") or {}
+    pairs_usable = data.get("pairs_usable")
+    if pairs_usable is None:
+        # No "data" block (hand-assembled or pre-fix-round-3 summary) --
+        # win_rate's own judged-pair count coincides with pairs_usable in
+        # the standard pipeline (grade.py only judges a pair when both
+        # arms succeeded), so it's a safe fallback rather than assuming data.
+        pairs_usable = wr.get("n", 0)
+    if pairs_usable == 0:
+        pairs_total = data.get("pairs_total")
+        control_failures = data.get("control_failures")
+        treatment_failures = data.get("treatment_failures")
+        headline = (
+            f"no successful paired runs: 0 of {pairs_total} runs produced "
+            "usable data" if pairs_total is not None else
+            "no successful paired runs: 0 pairs produced usable data"
+        )
+        no_data_reasons = [headline]
+        if control_failures is not None or treatment_failures is not None:
+            no_data_reasons.append(
+                f"control failed {control_failures if control_failures is not None else '?'}"
+                f"/{pairs_total if pairs_total is not None else '?'}, "
+                f"treatment failed {treatment_failures if treatment_failures is not None else '?'}"
+                f"/{pairs_total if pairs_total is not None else '?'}"
+            )
+        return {"accepted": False, "provisional": False, "directional": "unknown",
+                "reasons": no_data_reasons}
+
     reasons = []
     accepted = True
     provisional = False
@@ -755,7 +841,6 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
     effect = primary_effect if primary_effect is not None else summary.get("primary_effect")
     primary_metric = EFFECT_TO_EFFICIENCY_METRIC.get(effect) if effect else None
 
-    wr = summary.get("win_rate") or {}
     n = wr.get("n", 0)
     wins = wr.get("wins", 0)
     losses = wr.get("losses", 0)

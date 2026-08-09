@@ -8,6 +8,8 @@ project's global test constraint.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -16,7 +18,15 @@ from pathlib import Path
 from unittest import mock
 
 from interstellar import cli
-from interstellar.types import PATCH_RULES_APPEND, PATCH_SKILL_REMOVE, PATCH_SKILL_TRUNCATE
+from interstellar.types import (
+    PATCH_MCP_REMOVE,
+    PATCH_RULES_APPEND,
+    PATCH_SKILL_INSERT,
+    PATCH_SKILL_REMOVE,
+    PATCH_SKILL_TRUNCATE,
+    make_harness_version,
+    make_skill,
+)
 
 CORPUS_TRACE = cli.REPO_ROOT / "traces" / "corpus" / "skill_bloat_019fe41b.json"
 CACHED_RESULTS_DIR = cli.REPO_ROOT / "analyzer" / "results"
@@ -58,6 +68,7 @@ class ArgParsingTests(unittest.TestCase):
         self.assertEqual(args.seed, 0)
         self.assertEqual(args.max_token_regression, cli.DEFAULT_MAX_TOKEN_REGRESSION)
         self.assertIsNone(args.grok_home)
+        self.assertFalse(args.no_preflight)
 
     def test_flags_and_overrides(self):
         args = cli.build_arg_parser().parse_args([
@@ -66,7 +77,7 @@ class ArgParsingTests(unittest.TestCase):
             "--dry-run", "--serve", "--port", "9000", "--budget-usd", "1.5",
             "--use-cached-analysis", "--model", "grok-4.5", "--max-parallel", "1",
             "--timeout", "30", "--seed", "7", "--max-token-regression", "0.2",
-            "--grok-home", "/tmp/home",
+            "--grok-home", "/tmp/home", "--no-preflight",
         ])
         self.assertEqual(args.trace, ["a.json", "b.json"])
         self.assertEqual(args.k, 5)
@@ -83,6 +94,7 @@ class ArgParsingTests(unittest.TestCase):
         self.assertEqual(args.seed, 7)
         self.assertEqual(args.max_token_regression, 0.2)
         self.assertEqual(args.grok_home, Path("/tmp/home"))
+        self.assertTrue(args.no_preflight)
 
     def test_missing_trace_is_an_error(self):
         with self.assertRaises(SystemExit):
@@ -202,6 +214,25 @@ class PatchImpactScoreTests(unittest.TestCase):
         self.assertEqual(score, 0.0)
 
 
+class PatchImpactUnitTests(unittest.TestCase):
+    def test_skill_truncate_and_remove_share_tokens_unit(self):
+        self.assertEqual(cli._patch_impact_unit(
+            {"kind": PATCH_SKILL_TRUNCATE}), "tokens_est")
+        self.assertEqual(cli._patch_impact_unit(
+            {"kind": PATCH_SKILL_REMOVE}), "tokens_est")
+
+    def test_skill_insert_and_mcp_remove_share_ms_unit(self):
+        # skill.insert's only measured evidence (discovery-call ms after the
+        # load) is a time quantity, not a token count -- it must NOT be
+        # grouped with skill.truncate/remove's token-denominated class, even
+        # though all three share expected_effect=EFFECT_SKILL_TOKENS.
+        self.assertEqual(cli._patch_impact_unit({"kind": PATCH_SKILL_INSERT}), "ms")
+        self.assertEqual(cli._patch_impact_unit({"kind": PATCH_MCP_REMOVE}), "ms")
+
+    def test_rules_append_is_unmeasured(self):
+        self.assertEqual(cli._patch_impact_unit({"kind": PATCH_RULES_APPEND}), "unmeasured")
+
+
 class RankAndSelectTests(unittest.TestCase):
     def test_truncates_to_max_patches_and_logs_drops(self):
         dig = {"skills_loaded": [
@@ -220,9 +251,12 @@ class RankAndSelectTests(unittest.TestCase):
         self.assertEqual([p["patch_id"] for p in selected], ["patch-001"])
         dropped_ids = {d["patch_id"] for d in dropped}
         self.assertEqual(dropped_ids, {"patch-002", "patch-003"})
-        by_id = {d["patch_id"]: d["reason"] for d in dropped}
-        self.assertIn("budget", by_id["patch-002"])
-        self.assertIn("not appliable before ranking", by_id["patch-003"])
+        by_id = {d["patch_id"]: d for d in dropped}
+        self.assertIn("budget", by_id["patch-002"]["reason"])
+        self.assertEqual(by_id["patch-002"]["impact_unit"], "tokens_est")
+        self.assertEqual(by_id["patch-002"]["impact_score"], 10.0)
+        self.assertIn("not appliable before ranking", by_id["patch-003"]["reason"])
+        self.assertIsNone(by_id["patch-003"]["impact_score"])
 
     def test_keeps_everything_when_under_budget(self):
         patches_list = [
@@ -232,6 +266,109 @@ class RankAndSelectTests(unittest.TestCase):
         selected, dropped = cli._rank_and_select(patches_list, {}, max_patches=3)
         self.assertEqual(len(selected), 1)
         self.assertEqual(dropped, [])
+
+    def test_never_ranks_ms_against_tokens_across_classes(self):
+        # The exact shape of the reported bug: two mcp.remove patches
+        # (measured in ms) score just above a skill.truncate (measured in
+        # tokens_est) on raw magnitude alone. A flat top-N would pick both
+        # mcp patches and drop the skill patch; round-robin across the two
+        # unit classes must give the skill patch a slot instead.
+        dig = {
+            "skills_loaded": [{"skill": "strict-audit", "unreferenced_tokens_est": 728}],
+            "failed_mcp_servers": [
+                {"server": "fetch", "wasted_ms": 748},
+                {"server": "git", "wasted_ms": 741},
+            ],
+        }
+        patches_list = [
+            {"patch_id": "patch-001", "kind": PATCH_SKILL_TRUNCATE,
+             "target": "strict-audit", "skipped_reason": None},
+            {"patch_id": "patch-002", "kind": PATCH_MCP_REMOVE,
+             "target": "fetch", "skipped_reason": None},
+            {"patch_id": "patch-003", "kind": PATCH_MCP_REMOVE,
+             "target": "git", "skipped_reason": None},
+        ]
+        selected, dropped = cli._rank_and_select(patches_list, dig, max_patches=2)
+        selected_ids = {p["patch_id"] for p in selected}
+        self.assertIn("patch-001", selected_ids)  # the skill patch got a slot
+        self.assertEqual(len(selected_ids), 2)
+        self.assertEqual(len(dropped), 1)  # only the weaker of the two mcp patches drops
+        self.assertEqual(dropped[0]["patch_id"], "patch-003")
+        self.assertIn("'ms' impact class", dropped[0]["reason"])
+
+    def test_round_robin_gives_each_class_a_slot_before_a_second_pick(self):
+        dig = {
+            "skills_loaded": [
+                {"skill": "big", "unreferenced_tokens_est": 5000},
+                {"skill": "small", "unreferenced_tokens_est": 5},
+            ],
+            "mcp_servers": {"only-mcp": {"connect_ms": 100}},
+        }
+        patches_list = [
+            {"patch_id": "patch-001", "kind": PATCH_SKILL_TRUNCATE, "target": "big",
+             "skipped_reason": None},
+            {"patch_id": "patch-002", "kind": PATCH_SKILL_TRUNCATE, "target": "small",
+             "skipped_reason": None},
+            {"patch_id": "patch-003", "kind": PATCH_MCP_REMOVE, "target": "only-mcp",
+             "skipped_reason": None},
+        ]
+        # max_patches=2: round-robin must take the best of each class first
+        # (big, only-mcp) rather than both tokens_est patches (big, small).
+        selected, _ = cli._rank_and_select(patches_list, dig, max_patches=2)
+        self.assertEqual({p["patch_id"] for p in selected}, {"patch-001", "patch-003"})
+
+
+class RunHealthTests(unittest.TestCase):
+    def _run_result(self, ok):
+        return {"ok": ok}
+
+    def test_counts_ok_against_requested_k_not_attempted_count(self):
+        # Only 1 repeat actually ran (e.g. fail-fast stopped early), but the
+        # denominator must stay the ORIGINALLY requested k=3 so the shortfall
+        # itself is visible, not hidden behind a 1/1-looks-fine denominator.
+        matrix_summary = {"arms": {
+            "control": [self._run_result(True)],
+            "treatment": [self._run_result(False)],
+        }}
+        health = cli._run_health(matrix_summary, k=3)
+        self.assertEqual(health["control"], (1, 3))
+        self.assertEqual(health["treatment"], (0, 3))
+
+    def test_all_ok(self):
+        matrix_summary = {"arms": {
+            "control": [self._run_result(True)] * 3,
+            "treatment": [self._run_result(True)] * 3,
+        }}
+        health = cli._run_health(matrix_summary, k=3)
+        self.assertEqual(health["control"], (3, 3))
+        self.assertEqual(health["treatment"], (3, 3))
+
+    def test_empty_arms_is_zero_of_k(self):
+        health = cli._run_health({"arms": {"control": [], "treatment": []}}, k=3)
+        self.assertEqual(health["control"], (0, 3))
+        self.assertEqual(health["treatment"], (0, 3))
+
+    def test_missing_matrix_summary_is_zero_of_k(self):
+        health = cli._run_health(None, k=3)
+        self.assertEqual(health["control"], (0, 3))
+        self.assertEqual(health["treatment"], (0, 3))
+
+
+class CountRunsTests(unittest.TestCase):
+    def test_totals_across_patches(self):
+        patch_results = [
+            {"matrix": {"arms": {"control": [{"ok": True}, {"ok": False}],
+                                 "treatment": [{"ok": True}, {"ok": True}]}}},
+            {"matrix": {"arms": {"control": [{"ok": False}],
+                                 "treatment": [{"ok": False}]}}},
+        ]
+        total, ok = cli._count_runs(patch_results)
+        self.assertEqual(total, 6)
+        self.assertEqual(ok, 3)
+
+    def test_no_runs_is_zero_zero(self):
+        patch_results = [{"matrix": {"arms": {"control": [], "treatment": []}}}]
+        self.assertEqual(cli._count_runs(patch_results), (0, 0))
 
 
 class CostEstimateTests(unittest.TestCase):
@@ -269,6 +406,67 @@ class CheckBudgetTests(unittest.TestCase):
             cli._check_budget({"estimated_total_usd": None}, 5.0)
 
 
+class PreflightTests(unittest.TestCase):
+    """`_run_preflight` in isolation -- no `run_review` involved."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.out_dir = root / "out"
+        self.auth_home = root / "auth_home"
+        self.auth_home.mkdir()
+        (self.auth_home / "auth.json").write_text('{"token": "fake"}')
+
+    def _version(self, *, skills=None, **kwargs):
+        return make_harness_version(
+            version_id="v1", skills=skills or [], mcp_servers=[],
+            config_text="", **kwargs)
+
+    def test_success_does_not_raise(self):
+        cli._run_preflight(self._version(), out_dir=self.out_dir,
+                           auth_from=self.auth_home, model=None, timeout=30,
+                           runner=_fake_runner)  # must not raise
+
+    def test_failure_raises_with_verbatim_error(self):
+        def failing_runner(argv, **kwargs):
+            return _FakeCompletedProcess("not json", returncode=1,
+                                         stderr="Error: Not signed in.")
+
+        with self.assertRaises(SystemExit) as ctx:
+            cli._run_preflight(self._version(), out_dir=self.out_dir,
+                               auth_from=self.auth_home, model=None, timeout=30,
+                               runner=failing_runner)
+        message = str(ctx.exception)
+        self.assertIn("preflight check failed", message)
+        self.assertIn("Not signed in.", message)
+        self.assertIn("--no-preflight", message)
+
+    def test_runner_exception_raises_systemexit_too(self):
+        def exploding_runner(argv, **kwargs):
+            raise OSError("no such file: grok-dev")
+
+        with self.assertRaises(SystemExit) as ctx:
+            cli._run_preflight(self._version(), out_dir=self.out_dir,
+                               auth_from=self.auth_home, model=None, timeout=30,
+                               runner=exploding_runner)
+        self.assertIn("no such file: grok-dev", str(ctx.exception))
+
+    def test_does_not_leak_a_warning_into_the_real_version(self):
+        # A project-scope skill with no project_dest triggers a
+        # "not materialized" warning inside harness.materialize -- that
+        # warning is real for the actual replay (which DOES pass
+        # project_dest) but meaningless for this throwaway connectivity
+        # probe, and must not contaminate the version everything else reads.
+        version = self._version(
+            skills=[make_skill("proj-skill", path="p", content="---\n---\nx",
+                               scope="project")])
+        original_warnings = list(version["warnings"])
+        cli._run_preflight(version, out_dir=self.out_dir, auth_from=self.auth_home,
+                           model=None, timeout=30, runner=_fake_runner)
+        self.assertEqual(version["warnings"], original_warnings)
+
+
 # --------------------------------------------------------------------------
 # --dry-run: real corpus trace, cached analysis, no spawning
 # --------------------------------------------------------------------------
@@ -286,18 +484,22 @@ class DryRunTests(unittest.TestCase):
         (self.grok_home / "config.toml").write_text("")
 
     def test_dry_run_produces_patches_and_cost_estimate_without_spawning(self):
+        stdout = io.StringIO()
         with mock.patch("subprocess.run", side_effect=_refuse_to_spawn):
-            plan = cli.run_review(
-                CORPUS_TRACE, out_dir=self.out_dir, k=3, max_patches=2,
-                dry_run=True, use_cached_analysis=True,
-                grok_home_override=self.grok_home,
-            )
+            with contextlib.redirect_stdout(stdout):
+                plan = cli.run_review(
+                    CORPUS_TRACE, out_dir=self.out_dir, k=3, max_patches=2,
+                    dry_run=True, use_cached_analysis=True,
+                    grok_home_override=self.grok_home,
+                )
 
         self.assertIn("selected_patches", plan)
         self.assertGreater(len(plan["selected_patches"]), 0)
         self.assertLessEqual(len(plan["selected_patches"]), 2)
         for p in plan["selected_patches"]:
             self.assertEqual(p["planned_runs"], 6)  # 2 * k
+            self.assertIn("impact_score", p)
+            self.assertIn("impact_unit", p)
         self.assertIsNotNone(plan["cost_estimate"]["estimated_total_usd"])
         self.assertGreater(plan["cost_estimate"]["estimated_total_usd"], 0)
 
@@ -309,6 +511,17 @@ class DryRunTests(unittest.TestCase):
 
         progress = json.loads((self.out_dir / "progress.json").read_text())
         self.assertEqual(progress["status"], "dry_run_complete")
+
+        # --dry-run must not run silently: the plan has to be readable on
+        # stdout before/without ever spending anything.
+        printed = stdout.getvalue()
+        self.assertNotEqual(printed, "")
+        self.assertIn(plan["prompt_source"], printed)
+        self.assertIn(plan["baseline"]["version_id"], printed)
+        for p in plan["selected_patches"]:
+            self.assertIn(p["patch_id"], printed)
+        self.assertIn("estimated cost", printed)
+        self.assertIn(str(self.out_dir / "plan.json"), printed)
 
     def test_dry_run_skips_skill_insert_synthesis_call(self):
         # Confirms patches.from_recommendations gets a no-spawn grok stub in
@@ -361,8 +574,25 @@ class _FakeCompletedProcess:
 
 
 def _fake_runner(argv, **kwargs):
+    # replay.run_once only counts a run as `ok` when a NEW
+    # <home>/sessions/*/<session-id>/ directory shows up after the call (it
+    # diffs the directory set before/after) -- a real grok-dev process
+    # creates that as a side effect of running; this fake must too, or
+    # every fake run reads as a failure once anything (like the all-failed
+    # exit check) actually looks at `ok`. An empty/missing events.jsonl
+    # inside it is fine: grok_normalize.normalize_session returns None for
+    # that cleanly, without raising, so `trace` stays None but `ok` stays
+    # True -- exactly the "ok run, nothing to grade off the trace" case
+    # grade.efficiency() already treats as all-None metrics rather than a
+    # crash.
+    env = kwargs.get("env") or {}
+    home = env.get("GROK_HOME")
+    session_id = "fake-session"
+    if home:
+        (Path(home) / "sessions" / "fake-cwd" / session_id).mkdir(
+            parents=True, exist_ok=True)
     return _FakeCompletedProcess(json.dumps({
-        "sessionId": "fake-session",
+        "sessionId": session_id,
         "text": "fake response text",
         "total_cost_usd": 0.002,
         "num_turns": 1,
@@ -434,6 +664,17 @@ class ProgressJournalTests(unittest.TestCase):
         kwargs.update(overrides)
         return cli.run_review(self.trace_path, **kwargs)
 
+    def test_prints_a_summary_line_per_patch_and_the_report_path(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            rpt = self._run()
+        printed = stdout.getvalue()
+        self.assertNotEqual(printed, "")
+        for pr in rpt["patch_results"]:
+            self.assertIn(pr["patch"]["patch_id"], printed)
+            self.assertIn(pr["verdict_line"], printed)
+        self.assertIn(str(self.out_dir / "index.html"), printed)
+
     def test_journals_progress_after_each_patch(self):
         writes = []
         real_write_json = cli._write_json
@@ -489,6 +730,100 @@ class ProgressJournalTests(unittest.TestCase):
         self.assertTrue(patches_dir.is_dir())
         matrix_files = list(patches_dir.glob("*/matrix.json"))
         self.assertEqual(len(matrix_files), 2)
+
+    # -- preflight, fail-fast, and the all-failed exit code --------------
+
+    def test_preflight_runs_before_the_loop_and_aborts_on_failure(self):
+        def always_fail(argv, **kwargs):
+            return _FakeCompletedProcess("not json", returncode=1,
+                                         stderr="Error: Not signed in.")
+
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(runner=always_fail)  # no_preflight defaults to False
+        self.assertIn("preflight check failed", str(ctx.exception))
+
+        # aborted before the loop: progress never left the planning stage
+        progress = json.loads((self.out_dir / "progress.json").read_text())
+        self.assertEqual(progress["status"], "planned")
+        self.assertNotIn("completed_patches", progress)
+        self.assertFalse((self.out_dir / "report.json").exists())
+
+    def test_no_preflight_flag_skips_the_check(self):
+        # Fails only when routed through the preflight-only materialized
+        # home; a real per-patch replay call is unaffected.
+        def fail_only_preflight(argv, **kwargs):
+            home = (kwargs.get("env") or {}).get("GROK_HOME", "")
+            if "preflight-home" in home:
+                return _FakeCompletedProcess("not json", returncode=1, stderr="boom")
+            return _fake_runner(argv, **kwargs)
+
+        with self.assertRaises(SystemExit):
+            self._run(runner=fail_only_preflight)  # preflight on: aborts
+        rpt = self._run(runner=fail_only_preflight, no_preflight=True)  # skipped: succeeds
+        self.assertEqual(len(rpt["patch_results"]), 2)
+
+    def test_fail_fast_stops_after_first_pair_and_exits_nonzero_when_all_fail(self):
+        calls = []
+
+        def always_fail(argv, **kwargs):
+            calls.append(argv)
+            return _FakeCompletedProcess("not json", returncode=1,
+                                         stderr="Error: Not signed in.")
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as ctx:
+                self._run(k=3, max_parallel=1, runner=always_fail, no_preflight=True)
+        message = str(ctx.exception)
+        self.assertIn("all", message)
+        self.assertIn("failed this cycle", message)
+
+        # fail-fast: 2 calls (one pair) per patch, not 2*k=6 -- 2 patches total
+        self.assertEqual(len(calls), 4)
+
+        progress = json.loads((self.out_dir / "progress.json").read_text())
+        self.assertEqual(progress["status"], "failed_no_data")
+        # the report is still written for debugging, despite the raise
+        self.assertTrue((self.out_dir / "index.html").is_file())
+
+        printed = stdout.getvalue()
+        self.assertIn("stopped after the first paired run failed on both arms", printed)
+
+    def test_partial_failure_is_reported_as_run_health(self):
+        # Only the very first grok-dev call (patch-001's control repeat 0,
+        # deterministic under max_parallel=1) fails; everything else
+        # succeeds. Not a both-arms failure, so no fail-fast: all k=3
+        # repeats run, and the shortfall must show up as 2/3, not silently
+        # round down to a clean 1/1 or get skipped.
+        state = {"n": 0}
+
+        def fail_first_call_only(argv, **kwargs):
+            state["n"] += 1
+            if state["n"] == 1:
+                return _FakeCompletedProcess("not json", returncode=1, stderr="boom")
+            return _fake_runner(argv, **kwargs)
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            rpt = self._run(k=3, max_parallel=1, runner=fail_first_call_only,
+                            no_preflight=True)
+
+        first = rpt["patch_results"][0]
+        control_runs = first["matrix"]["arms"]["control"]
+        treatment_runs = first["matrix"]["arms"]["treatment"]
+        self.assertEqual(len(control_runs), 3)
+        self.assertEqual(len(treatment_runs), 3)
+        self.assertEqual(sum(1 for r in control_runs if r["ok"]), 2)
+        self.assertEqual(sum(1 for r in treatment_runs if r["ok"]), 3)
+
+        printed = stdout.getvalue()
+        self.assertIn("control 2/3 ok, treatment 3/3 ok", printed)
+
+        progress = json.loads((self.out_dir / "progress.json").read_text())
+        first_completed = progress["completed_patches"][0]
+        self.assertEqual(first_completed["control_ok"], 2)
+        self.assertEqual(first_completed["treatment_ok"], 3)
+        self.assertIsNone(first_completed["fail_fast_reason"])
 
 
 if __name__ == "__main__":

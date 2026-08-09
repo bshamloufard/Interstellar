@@ -86,9 +86,18 @@ def run_once(prompt, home: Path, *, workdir: Path, timeout=600, model=None,
     trace is not a data point. `ok=False` covers timeout, unparseable stdout,
     a non-zero exit, no findable session dir, a normalizer crash, and -- as a
     last resort -- any other exception raised anywhere in this function.
+
+    `home` and `workdir` are resolved to absolute paths before anything else:
+    grok resolves a relative `GROK_HOME` against its own cwd (`workdir`, via
+    the `cwd=` kwarg below), not the caller's cwd, so a relative `home` sends
+    grok looking for the home in the wrong place entirely -- it finds
+    nothing, silently materializes a fresh empty one, and reports itself
+    signed out. A relative `workdir` is also useless once recorded on the
+    RunResult, since the report's reader has a different cwd than the runner
+    did.
     """
-    home = Path(home)
-    workdir = Path(workdir)
+    home = Path(home).resolve()
+    workdir = Path(workdir).resolve()
     extra_rules = list(extra_rules or [])
 
     argv = [str(GROK), "-p", prompt, "--output-format", "json",
@@ -269,7 +278,16 @@ def run_matrix(prompt, *, control, treatment, k: int, workspace: Path,
     itself is real (submission order below is the interleaved order) but is
     not yet independently recorded on the return value.
     """
-    scratch = Path(scratch)
+    # Resolved once, up front: everything derived from `scratch` below --
+    # every per-run home_dest/workdir_dest -- must be absolute, the same
+    # reason run_once resolves `home`/`workdir` itself (see its docstring).
+    # A relative `scratch` would otherwise reproduce the exact bug even
+    # though run_once also resolves, because the setup-failure branch below
+    # records home_dest/workdir_dest on a RunResult without ever calling
+    # run_once.
+    scratch = Path(scratch).resolve()
+    workspace = Path(workspace).resolve()
+    auth_from = Path(auth_from).resolve()
     plan = []
     for i in range(k):
         plan.append((ARM_CONTROL, i, control))

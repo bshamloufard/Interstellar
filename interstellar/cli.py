@@ -21,8 +21,19 @@ silently:
     analyzer recommendations can expand into dozens of individual patches
     (one per skill/server named in a comma-joined recommendation target),
     and each tested patch costs `2 * k` grok-dev sessions. Patches are
-    ranked by a real, trace-measured impact score before truncating
-    (`_patch_impact_score`), and every dropped patch is logged with why.
+    ranked by a real, trace-measured impact score (`_patch_impact_score`)
+    within same-unit classes (`_patch_impact_unit` -- a millisecond score
+    is never ranked against a token score) and interleaved round-robin
+    across classes (`_rank_and_select`), so the selection spreads across
+    the distinct kinds of evidence present instead of favoring whichever
+    unit happens to produce the largest raw numbers. Every dropped patch
+    is logged with why, impact score and unit included.
+  * `--dry-run` and a live cycle both print a compact, human-readable
+    summary as they go (prompt/baseline/selected+dropped patches/cost
+    estimate for a dry run; a line per patch plus the report path for a
+    live cycle) -- the JSON artifacts are the full record, but a command
+    someone is about to spend real money on must say something on stdout,
+    not run silently to a 0 exit code.
   * `--dry-run` performs analysis, patch construction/ranking, and the pure
     `harness.apply` diff preview, then stops — it never calls
     `harness.materialize`, `replay.run_matrix`, or spawns grok-dev. A
@@ -37,6 +48,16 @@ silently:
     `total_cost_usd` on a run, or `meta.cost_usd` recorded by a past
     analyzer run) or is clearly labelled as an estimate and states which
     measurements it was derived from. Nothing is invented.
+  * Before spending a cycle, one cheap grok-dev call runs through the
+    baseline home (`_run_preflight`, skipped by `--dry-run` or
+    `--no-preflight`) so an auth/environment failure is caught once instead
+    of being rediscovered by every one of `2 * k` runs per patch. Within a
+    patch, the first control/treatment pair always runs alone; if BOTH
+    arms fail on it, the remaining `k - 1` repeats are skipped rather than
+    re-discovering the same failure repeatedly, and the report says so. If
+    every run across the whole cycle fails, `run_review` raises
+    `SystemExit` after writing the report -- a cycle that produced no
+    usable data is not a success, and exiting 0 would say otherwise.
 
     python3 -m unittest discover interstellar/tests
 """
@@ -45,6 +66,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -135,6 +157,20 @@ def _sum_run_costs(matrix):
             if c is not None:
                 total += c
     return total
+
+
+def _count_runs(patch_results):
+    """(total attempted runs, total ok runs) across every patch's matrix --
+    used to detect a cycle where every single run failed (an auth/
+    environment problem, most likely), which must not exit 0."""
+    total = ok = 0
+    for pr in patch_results:
+        for runs in ((pr.get("matrix") or {}).get("arms") or {}).values():
+            for r in runs:
+                total += 1
+                if r.get("ok"):
+                    ok += 1
+    return total, ok
 
 
 # --------------------------------------------------------------------------
@@ -275,16 +311,17 @@ def _load_cached_analysis(trace_path, results_dir):
 def _patch_impact_score(patch, dig):
     """A real, trace-measured number estimating what this one patch would
     actually have saved IN THIS SESSION -- never a fabricated constant.
+    Always denominated in the unit `_patch_impact_unit` names for this same
+    patch's kind; the two functions are a pair and must be read together.
 
-    This is deliberately not cross-kind-normalized (skill patches score in
-    est. tokens, mcp patches score in ms): comparing tokens to milliseconds
-    has no principled exchange rate, so ranking is only claimed to be sound
-    within the same expected_effect family. What it does buy: within a
-    family it distinguishes a patch with real evidence in this trace from
-    one with none, which is exactly the brief's example -- a skill.truncate
-    against a skill with high measured `unreferenced_tokens_est` outranks a
-    skill.remove for a skill that was never loaded this session at all
-    (score 0, even though it costs real tokens in the install catalog)."""
+    `skill.remove` against a skill this session never loaded scores 0 on
+    purpose, not by accident: removing dead catalog weight is real hygiene,
+    but this trace has no evidence it cost anything HERE, so it is right
+    for a patch with real per-session evidence to always outrank it -- see
+    the brief's own example, a skill.truncate against a skill with high
+    measured `unreferenced_tokens_est` outranking a skill.remove for a
+    never-loaded skill (score 0, even though it costs real tokens in the
+    install catalog)."""
     kind, target = patch["kind"], patch["target"]
 
     if kind == PATCH_SKILL_TRUNCATE:
@@ -318,43 +355,98 @@ def _patch_impact_score(patch, dig):
     return 0.0
 
 
+def _patch_impact_unit(patch):
+    """The physical unit `_patch_impact_score` is denominated in for this
+    patch's kind -- the grouping key `_rank_and_select` uses so a score is
+    never ranked against a score measuring something else.
+
+    Deliberately keyed on the unit itself, not on `patch["expected_effect"]`:
+    `skill.truncate`/`skill.remove`/`skill.insert` all share
+    `EFFECT_SKILL_TOKENS`, but `skill.insert`'s only available trace-measured
+    evidence is milliseconds of discovery calls after the skill load (there
+    is no token count for guidance that was never written), not a token
+    count like the other two skill kinds -- grouping by `expected_effect`
+    alone would still silently rank an ms score against a token score
+    within that one family, which is exactly the bug this function exists
+    to prevent."""
+    kind = patch["kind"]
+    if kind in (PATCH_SKILL_TRUNCATE, PATCH_SKILL_REMOVE):
+        return "tokens_est"
+    if kind in (PATCH_SKILL_INSERT, PATCH_MCP_REMOVE):
+        return "ms"
+    return "unmeasured"  # rules.append: _patch_impact_score is always 0.0
+
+
 def _rank_and_select(all_patches, dig, max_patches):
-    """Rank appliable patches by `_patch_impact_score` (desc, patch_id as a
-    stable tiebreak) and keep the top `max_patches`. Every patch that is
-    NOT selected is logged with a concrete reason -- either it was already
-    unappliable (lint/range/model-call failure from patches.py) or it lost
-    on rank -- so a run never reads as "we silently tested a top-N and
+    """Rank appliable patches WITHIN their `_patch_impact_unit` class (a
+    millisecond score is never compared against a token score), then
+    interleave the per-class ranked lists round-robin -- one candidate from
+    each class present, repeated -- so `--max-patches` yields a spread
+    across the distinct measured units in play rather than N patches from
+    whichever unit happens to produce the largest raw numbers.
+
+    Class order is first-seen order among the ranked patches, not sorted by
+    name or magnitude, so which class gets first pick in the round-robin is
+    an accident of recommendation order, not a re-introduction of the same
+    scale bias one level up.
+
+    Every patch NOT selected -- already-unappliable, or cut by the budget
+    -- is logged with a concrete reason (including its own impact_score/
+    impact_unit) so a run never reads as "we silently tested a top-N and
     called it everything"."""
     appliable = [p for p in all_patches if not p.get("skipped_reason")]
     already_skipped = [p for p in all_patches if p.get("skipped_reason")]
 
-    ranked = sorted(appliable,
-                    key=lambda p: (-_patch_impact_score(p, dig), p["patch_id"]))
-    selected = ranked[:max_patches]
+    classes = {}
+    for p in appliable:
+        classes.setdefault(_patch_impact_unit(p), []).append(p)
+    for group in classes.values():
+        group.sort(key=lambda p: (-_patch_impact_score(p, dig), p["patch_id"]))
+    class_order = list(classes.keys())  # first-seen order, see docstring
+
+    selected = []
+    cursor = {unit: 0 for unit in class_order}
+    while len(selected) < max_patches and any(
+            cursor[u] < len(classes[u]) for u in class_order):
+        for unit in class_order:
+            if len(selected) >= max_patches:
+                break
+            i = cursor[unit]
+            if i < len(classes[unit]):
+                selected.append(classes[unit][i])
+                cursor[unit] += 1
     selected_ids = {p["patch_id"] for p in selected}
 
     dropped = []
-    for rank, p in enumerate(ranked, start=1):
-        if p["patch_id"] in selected_ids:
-            continue
-        score = _patch_impact_score(p, dig)
-        dropped.append({
-            "patch_id": p["patch_id"], "kind": p["kind"], "target": p["target"],
-            "reason": (f"budget: ranked {rank} of {len(ranked)} candidate "
-                       f"patches by impact_score={score:g} "
-                       f"(--max-patches={max_patches})"),
-        })
+    for unit in class_order:
+        group = classes[unit]
+        for rank, p in enumerate(group, start=1):
+            if p["patch_id"] in selected_ids:
+                continue
+            score = _patch_impact_score(p, dig)
+            dropped.append({
+                "patch_id": p["patch_id"], "kind": p["kind"], "target": p["target"],
+                "impact_score": score, "impact_unit": unit,
+                "reason": (f"budget: ranked {rank} of {len(group)} in the "
+                           f"{unit!r} impact class (impact_score={score:g} "
+                           f"{unit}); round-robin across {len(class_order)} "
+                           f"class(es) filled --max-patches={max_patches} "
+                           "before reaching it"),
+            })
     for p in already_skipped:
         dropped.append({
             "patch_id": p["patch_id"], "kind": p["kind"], "target": p["target"],
+            "impact_score": None, "impact_unit": None,
             "reason": f"not appliable before ranking: {p['skipped_reason']}",
         })
     return selected, dropped
 
 
-def _patch_preview(patch, k):
+def _patch_preview(patch, k, dig):
     preview = dict(patch)
     preview["planned_runs"] = 2 * k
+    preview["impact_score"] = _patch_impact_score(patch, dig)
+    preview["impact_unit"] = _patch_impact_unit(patch)
     return preview
 
 
@@ -533,6 +625,169 @@ def _base_extra_caveats(trace, baseline_source, baseline_version, estimate,
 
 
 # --------------------------------------------------------------------------
+# stdout summaries
+# --------------------------------------------------------------------------
+#
+# Silence on success is a fine convention for a library call and a bad one
+# for a command someone is about to spend real money on: every path below
+# that can spend a dollar or more (a live analyzer call, a replay matrix)
+# prints something a human can read before/while it happens, in addition to
+# the always-written JSON artifacts. Nothing here is read back by any other
+# part of this module -- it is output, not state.
+
+def _truncate(text, n=200):
+    text = text or ""
+    return text if len(text) <= n else text[: n - 3] + "..."
+
+
+def _print_dropped(dropped_patches, limit=8):
+    shown = dropped_patches[:limit]
+    for d in shown:
+        print(f"    [{d['patch_id']}] {d['kind']}/{d['target']}: {d['reason']}")
+    more = len(dropped_patches) - len(shown)
+    if more > 0:
+        print(f"    ... and {more} more (see plan.json / progress.json)")
+
+
+def _print_cost_estimate(estimate, budget_usd):
+    total = estimate.get("estimated_total_usd")
+    print(f"  planned replay runs: {estimate['planned_replay_runs']}")
+    if total is not None:
+        print(
+            f"  estimated cost: ${total:.4f} "
+            f"(replay ${estimate['replay_cost_estimate_usd']:.4f}"
+            f" + analyzer ${estimate['analyzer_cost_estimate_usd'] or 0.0:.4f})"
+        )
+    else:
+        print("  estimated cost: unavailable (no manifest cost data)")
+    print(f"  {estimate['note']}")
+    if budget_usd is not None:
+        print(f"  budget cap: ${budget_usd:.4f}")
+
+
+def _print_dry_run_summary(plan, plan_path):
+    b = plan["baseline"]
+    print(f"=== dry run: {plan['trace_file']} ===")
+    print(f"prompt (source: {plan['prompt_source']}):")
+    print(f"  {_truncate(plan['prompt'])}")
+    print(
+        f"baseline: {b['version_id']} from {b['source']} "
+        f"({b['skills']} skill(s), {b['mcp_servers']} mcp server(s))"
+    )
+    for w in b.get("warnings") or []:
+        print(f"  ! {w}")
+    print(f"k={plan['k']} paired repeats per patch")
+
+    selected = plan["selected_patches"]
+    dropped = plan["dropped_patches"]
+    print(f"selected {len(selected)} patch(es), {len(dropped)} candidate(s) dropped:")
+    for p in selected:
+        print(
+            f"    [{p['patch_id']}] {p['kind']} on {p['target']!r} -> "
+            f"{p['expected_effect']} (impact_score={p['impact_score']:g} "
+            f"{p['impact_unit']}, {p['planned_runs']} planned run(s))"
+        )
+    if dropped:
+        print(f"  dropped ({len(dropped)}):")
+        _print_dropped(dropped)
+
+    print("cost estimate:")
+    _print_cost_estimate(plan["cost_estimate"], plan["budget_usd"])
+    print(f"full plan: {plan_path}")
+
+
+def _run_health(matrix_summary, k):
+    """{arm: (ok_count, k)} read straight off a (possibly trace-stripped)
+    ReplayMatrix's `ok` flags -- k is always the ORIGINALLY REQUESTED repeat
+    count, not how many actually ran, so "1/3 ok" still reads correctly when
+    fail-fast stopped a patch after just the first pair: the shortfall
+    itself is the signal, not just the failures within what did run."""
+    arms = (matrix_summary or {}).get("arms") or {}
+    health = {}
+    for arm in (ARM_CONTROL, ARM_TREATMENT):
+        runs = arms.get(arm) or []
+        health[arm] = (sum(1 for r in runs if r.get("ok")), k)
+    return health
+
+
+def _print_patch_result(patch, gate_result, verdict, health):
+    control_ok, control_k = health[ARM_CONTROL]
+    treatment_ok, treatment_k = health[ARM_TREATMENT]
+    print(f"  [{patch['patch_id']}] {patch['kind']} on {patch['target']!r}: {verdict}")
+    print(f"      control {control_ok}/{control_k} ok, "
+          f"treatment {treatment_ok}/{treatment_k} ok")
+
+
+def _print_cycle_summary(rpt, out_dir, total_cost):
+    print(f"=== cycle done: {len(rpt['patch_results'])} patch(es) tested "
+          f"(spent ${total_cost:.4f}) ===")
+    print(f"report: {Path(out_dir) / 'index.html'}")
+
+
+def _preflight_prompt():
+    return "Reply with the single word OK."
+
+
+def _run_preflight(baseline_version, *, out_dir, auth_from, model, timeout, runner):
+    """One cheap grok-dev call through the baseline home before spending a
+    whole cycle on it: an expired token, a missing XAI_API_KEY, or a broken
+    grok-dev install would otherwise be discovered independently by every
+    one of `2 * k` runs per patch, for every patch, before the cycle gives
+    up on its own. Raises SystemExit with the failure verbatim -- never
+    silently continues past a broken environment.
+
+    Uses a shallow copy of `baseline_version` with its own `warnings` list,
+    not the real one: `harness.materialize` can append a warning in place
+    (e.g. "project skill not materialized" when no `project_dest` is given,
+    which this throwaway connectivity check has no use for and no business
+    leaking into the real cycle's report caveats)."""
+    probe_version = dict(baseline_version)
+    probe_version["warnings"] = list(baseline_version.get("warnings") or [])
+    home = harness.materialize(
+        probe_version, Path(out_dir) / "scratch" / "preflight-home",
+        auth_from=auth_from)
+
+    argv = [str(replay.GROK), "-p", _preflight_prompt(),
+            "--output-format", "json", "--permission-mode", "bypassPermissions"]
+    if model:
+        argv += ["--model", model]
+    env = {**os.environ, "GROK_HOME": str(home)}
+
+    try:
+        proc = runner(argv, cwd=str(home), env=env,
+                      capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        raise SystemExit(
+            f"error: preflight check could not run grok-dev at all: "
+            f"{type(exc).__name__}: {exc}\nAborting before spending a "
+            "cycle. Pass --no-preflight to skip this check."
+        )
+
+    error = None
+    out = {}
+    try:
+        out = json.loads(proc.stdout)
+        if not isinstance(out, dict):
+            raise TypeError("stdout json is not an object")
+    except (json.JSONDecodeError, TypeError) as exc:
+        error = (f"unparseable stdout ({exc}); exit={proc.returncode} "
+                 f"stderr={(proc.stderr or '')[-500:]!r}")
+    else:
+        if proc.returncode != 0:
+            error = (f"grok-dev exited {proc.returncode}: "
+                     f"{(proc.stderr or out.get('text') or '')[-500:]}")
+
+    if error:
+        raise SystemExit(
+            "error: preflight check failed -- aborting before spending a "
+            f"cycle.\n{error}\nIf this is an auth problem, grok's own "
+            "error above usually names the fix (commonly `grok login "
+            "--device-code`, or setting XAI_API_KEY). Pass --no-preflight "
+            "to skip this check."
+        )
+
+
+# --------------------------------------------------------------------------
 # the orchestrator
 # --------------------------------------------------------------------------
 
@@ -544,7 +799,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
                grok_home_override=None, auth_from=None, repo_root=None,
                digest_fn=None, analyze_fn=None, patches_grok=None,
                judge_grok=None, runner=None, stats_summarize=None,
-               stats_gate=None, now=None):
+               stats_gate=None, no_preflight=False, now=None):
     """Run one review cycle end to end. Every dependency that would spawn a
     process or call a model has an injection point (defaulting to the real
     implementation) so tests can exercise the whole orchestration without
@@ -634,15 +889,17 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
                 "warnings": baseline_version["warnings"],
             },
             "k": k,
-            "selected_patches": [_patch_preview(p, k) for p in selected_patches],
+            "selected_patches": [_patch_preview(p, k, dig) for p in selected_patches],
             "dropped_patches": dropped_patches,
             "cost_estimate": estimate,
             "budget_usd": budget_usd,
         }
-        _write_json(out_dir / "plan.json", plan)
+        plan_path = out_dir / "plan.json"
+        _write_json(plan_path, plan)
         state["status"] = "dry_run_complete"
         state["updated_at"] = now().isoformat()
         _write_json(progress_path, state)
+        _print_dry_run_summary(plan, plan_path)
         if serve:
             print("note: --serve ignored under --dry-run (no report to serve)",
                   file=sys.stderr)
@@ -660,6 +917,8 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             patch_results=[], k=k, cost_usd=0.0,
             extra_caveats=_base_extra_caveats(trace, *caveats_args))
         report.write(rpt, out_dir)
+        print("=== cycle done: no appliable candidate patches this cycle ===")
+        print(f"report: {out_dir / 'index.html'}")
         if serve:
             report.serve(out_dir, port=port)
         return rpt
@@ -670,11 +929,17 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             "this machine -- cannot safely replay the original prompt"
         )
 
+    if not no_preflight:
+        _run_preflight(baseline_version, out_dir=out_dir, auth_from=real_grok_home,
+                       model=model, timeout=timeout, runner=runner)
+
     patch_results = []
     total_cost = 0.0
     if not use_cached_analysis and analysis_meta.get("cost_usd"):
         total_cost += analysis_meta["cost_usd"]
 
+    print(f"=== running review cycle: {len(selected_patches)} patch(es) selected, "
+          f"k={k} ===")
     state["status"] = "running"
     state["completed_patches"] = []
     for patch in selected_patches:
@@ -686,6 +951,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
         application = applications[0]
         patch_scratch = out_dir / "scratch" / patch["patch_id"]
 
+        fail_fast_reason = None
         if application["applied"]:
             # run_matrix materializes both arms itself, once per run (see
             # its docstring): a shared pre-built home would carry the
@@ -693,12 +959,43 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             # which outranks $GROK_HOME/skills/ in grok's own precedence and
             # would silently shadow a patched project skill. control/
             # treatment are passed as HarnessVersion dicts, not paths.
+            #
+            # The first pair is always run alone (k=1) before committing to
+            # the rest: if it fails on BOTH arms, that is almost always a
+            # systemic problem (auth expiring mid-cycle, the endpoint down)
+            # rather than anything specific to this patch, and running the
+            # remaining k-1 repeats would just pay to rediscover the same
+            # failure k-1 more times. Only one arm failing is left alone --
+            # that is real signal (a regression), not a reason to stop.
             matrix = replay.run_matrix(
                 prompt, control=baseline_version, treatment=treatment_version,
-                k=k, workspace=workspace, scratch=patch_scratch / "runs",
+                k=1, workspace=workspace, scratch=patch_scratch / "runs",
                 auth_from=real_grok_home,
                 max_parallel=max_parallel, timeout=timeout, model=model,
                 patch_id=patch["patch_id"], runner=runner)
+            probe_control = matrix["arms"][ARM_CONTROL][0]
+            probe_treatment = matrix["arms"][ARM_TREATMENT][0]
+
+            if k > 1 and not probe_control.get("ok") and not probe_treatment.get("ok"):
+                fail_fast_reason = (
+                    "stopped after the first paired run failed on both arms "
+                    f"(control error: {probe_control.get('error')!r}; "
+                    f"treatment error: {probe_treatment.get('error')!r}); "
+                    f"not spending the remaining {k - 1} repeat(s)"
+                )
+            elif k > 1:
+                rest = replay.run_matrix(
+                    prompt, control=baseline_version, treatment=treatment_version,
+                    k=k - 1, workspace=workspace, scratch=patch_scratch / "runs-rest",
+                    auth_from=real_grok_home,
+                    max_parallel=max_parallel, timeout=timeout, model=model,
+                    patch_id=patch["patch_id"], runner=runner)
+                for arm in (ARM_CONTROL, ARM_TREATMENT):
+                    for r in rest["arms"][arm]:
+                        r["repeat"] = r.get("repeat", 0) + 1
+                    matrix["arms"][arm].extend(rest["arms"][arm])
+                matrix["k"] = k
+
             grades = grade.grade_matrix(matrix, prompt=prompt, grok=judge_grok)
 
             summarize_fn = stats_summarize or _default_stats_summarize
@@ -725,10 +1022,14 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
                 patch_id=patch["patch_id"])
 
         verdict = _verdict_line(patch, gate_result)
+        if fail_fast_reason:
+            verdict += f" [{fail_fast_reason}]"
         patch_results.append(make_patch_result(
             patch=patch, application=application, matrix_summary=matrix_summary,
             grades=grades, statistics=summary, gate=gate_result,
             verdict_line=verdict))
+        health = _run_health(matrix_summary, k)
+        _print_patch_result(patch, gate_result, verdict, health)
 
         state["completed_patches"].append({
             "patch_id": patch["patch_id"], "kind": patch["kind"],
@@ -737,6 +1038,8 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             "provisional": gate_result.get("provisional"),
             "directional": gate_result.get("directional"),
             "verdict_line": verdict,
+            "control_ok": health[ARM_CONTROL][0], "treatment_ok": health[ARM_TREATMENT][0],
+            "fail_fast_reason": fail_fast_reason,
         })
         state["current_patch"] = None
         state["updated_at"] = now().isoformat()
@@ -748,14 +1051,27 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
         patch_results=patch_results, k=k, cost_usd=total_cost,
         extra_caveats=_base_extra_caveats(trace, *caveats_args))
     report.write(rpt, out_dir)
+    _print_cycle_summary(rpt, out_dir, total_cost)
 
-    state["status"] = "done"
+    total_runs, total_ok = _count_runs(patch_results)
+    all_failed = total_runs > 0 and total_ok == 0
+    state["status"] = "failed_no_data" if all_failed else "done"
     state["report_cost_usd"] = total_cost
     state["updated_at"] = now().isoformat()
     _write_json(progress_path, state)
 
     if serve:
         report.serve(out_dir, port=port)
+
+    if all_failed:
+        raise SystemExit(
+            f"error: all {total_runs} replay run(s) across {len(patch_results)} "
+            "patch(es) failed this cycle -- no usable data was produced. A "
+            f"report was still written to {out_dir / 'index.html'} for "
+            "debugging, but this is not a successful cycle. Check the "
+            "per-run `error` fields in progress.json / patches/*/matrix.json "
+            "-- a common cause is an auth/environment failure."
+        )
     return rpt
 
 
@@ -830,6 +1146,9 @@ def build_arg_parser():
     review.add_argument("--grok-home", type=Path, default=None,
                         help="override the harness snapshot source instead "
                              "of the trace's recorded home / live ~/.grok")
+    review.add_argument("--no-preflight", action="store_true",
+                        help="skip the one-call auth/environment check "
+                             "normally run before spending a cycle")
 
     return parser
 
@@ -850,7 +1169,7 @@ def cmd_review(args):
         dry_run=args.dry_run, serve=args.serve, port=args.port, model=args.model,
         max_parallel=args.max_parallel, timeout=args.timeout, seed=args.seed,
         max_token_regression=args.max_token_regression,
-        grok_home_override=args.grok_home,
+        grok_home_override=args.grok_home, no_preflight=args.no_preflight,
     )
     return 0
 

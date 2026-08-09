@@ -281,6 +281,49 @@ def _accepted_zero_decided_pairs_patch_result():
     )
 
 
+def _no_data_patch_result():
+    """stats.py fix-round-3: every run failed on at least one arm (a real
+    k=3 cycle hit this on a transient auth error). stats.gate() short-
+    circuits to directional="unknown" before any other check runs. Must
+    render as NO DATA, not a bare REJECTED that reads as "measured and
+    lost" -- distinct from both NOT RUN (never applied) and a real
+    directional="neutral" (measured and came out even)."""
+    grades = [
+        make_grade(
+            repeat=i, control_efficiency={}, treatment_efficiency={}, judge=None,
+            control_ok=False, treatment_ok=False,
+        )
+        for i in range(3)
+    ]
+    return _patch_result(
+        "p13", "flaky-skill", grades,
+        rationale="Trims a rarely-hit error path.",
+        verdict_line="All three repeats failed on a transient auth error before either arm produced usable data.",
+    )
+
+
+def _partial_failure_patch_result():
+    """1 of 3 repeats usable (control failed once, treatment failed once,
+    on different repeats). statistics["n"] now means usable pairs (1), not
+    total repeats attempted (3) -- must stay visible as "1 of 3", not
+    silently reported as n=1 with no context for where the other 2 went."""
+    grades = [
+        make_grade(
+            repeat=0, control_efficiency=dict(BASE_EFFICIENCY),
+            treatment_efficiency={**BASE_EFFICIENCY, "skill_tokens_est": 900},
+            judge=make_judge_verdict(verdict="treatment", consistent=True),
+            control_ok=True, treatment_ok=True,
+        ),
+        make_grade(repeat=1, control_efficiency={}, treatment_efficiency={}, judge=None, control_ok=False, treatment_ok=True),
+        make_grade(repeat=2, control_efficiency={}, treatment_efficiency={}, judge=None, control_ok=True, treatment_ok=False),
+    ]
+    return _patch_result(
+        "p14", "half-measured-skill", grades,
+        rationale="Trims an example block.",
+        verdict_line="Only one of three repeats produced usable data; the other two failed on one arm each.",
+    )
+
+
 def _session():
     return {
         "session_id": "019fe438-a9e4-7f42-ab5a-3c715f066f87",
@@ -621,6 +664,306 @@ class WriteTests(unittest.TestCase):
         html_text = self._html()
         self.assertNotIn("<script>alert(1)</script>", html_text)
         self.assertIn("&lt;script&gt;", html_text)
+
+
+class FixRound3ReviewTests(unittest.TestCase):
+    """Every Critical/Important from review-report.md, verified against the
+    real HTML the fix produces (not just that the function returns
+    something) -- the review's own method."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out_dir = Path(self.tmp.name) / "out"
+
+    def _build_and_write(self, patch_results, k=3, **kwargs):
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=patch_results, k=k, cost_usd=2.5, **kwargs,
+        )
+        report.write(rpt, self.out_dir)
+        return rpt
+
+    def _html(self):
+        return (self.out_dir / "index.html").read_text(encoding="utf-8")
+
+    # --- C-1: never-applied patch must not read as "measured and lost" ---
+
+    def test_never_applied_patch_renders_not_run_never_reject(self):
+        self._build_and_write([_not_run_patch_result()], k=0)
+        html_text = self._html()
+        self.assertIn('class="badge not-run">NOT RUN</span>', html_text)
+        self.assertNotIn('class="badge reject"', html_text)
+        self.assertIn("Not applied: lint: cited line range", html_text)
+
+    # --- C-2: a high-severity regression must dominate the badge, visibly,
+    # regardless of what accepted/provisional/directional say ---
+
+    def test_high_severity_regression_overrides_a_favorable_looking_gate(self):
+        pr = _high_regression_but_favorable_gate_patch_result()
+        # sanity: the win/loss counts alone (what a reader would infer
+        # without the override) really do look favorable -- 4 wins, 0
+        # losses -- so this is exercising report.py's own override, not
+        # merely re-checking that stats.gate() already forces
+        # directional="unfavorable" on a high-severity regression (it
+        # does, independently -- see stats.py's own final override; this
+        # test is the "do not rely on that alone" half of the fix).
+        wr = pr["statistics"]["win_rate"]
+        self.assertEqual(wr["losses"], 0)
+        self.assertGreater(wr["wins"], 0)
+        self._build_and_write([pr], k=5)
+        html_text = self._html()
+        self.assertIn('class="badge regressed">REGRESSED &middot; 1 HIGH-SEVERITY</span>', html_text)
+        self.assertNotIn("FAVORABLE", html_text.split('<div class="patch-body">')[0])
+
+    # --- C-3: no paired data must say so, never a dash plus a guessed why ---
+
+    def test_metric_with_no_paired_data_says_so_not_a_dash(self):
+        pr = _accepted_patch_result()
+        # zero out one metric's pairing entirely, as efficiency_deltas()
+        # does for a metric no grade reported on either side
+        pr["statistics"]["efficiency"]["turns"] = {
+            "lower_is_better": True, "n": 0,
+            "control_median": None, "treatment_median": None,
+            "abs_delta": None, "pct_delta": None, "bootstrap": None,
+        }
+        self._build_and_write([pr], k=12)
+        html_text = self._html()
+        self.assertIn("no paired data", html_text)
+        self.assertNotIn("control ≈ 0", html_text)
+        self.assertNotIn("<td>—</td><td>—</td><td>n/a</td>", html_text)
+
+    # --- stats.py fix-round-3: zero-usable-pairs must not read as a
+    # measured loss, and a partial failure must stay visible ---
+
+    def test_zero_usable_pairs_renders_no_data_never_reject(self):
+        pr = _no_data_patch_result()
+        self.assertEqual(pr["gate"]["directional"], "unknown")  # sanity
+        self._build_and_write([pr], k=3)
+        html_text = self._html()
+        self.assertIn('class="badge no-data">NO DATA</span>', html_text)
+        self.assertNotIn('class="badge reject"', html_text)
+        self.assertIn("no successful paired runs: 0 of 3 runs produced usable data", html_text)
+
+    def test_no_data_is_distinct_from_not_run_and_from_real_neutral(self):
+        # three genuinely different truths, three genuinely different badges
+        self._build_and_write(
+            [_no_data_patch_result(), _not_run_patch_result(), _directional_patch_result()], k=3,
+        )
+        html_text = self._html()
+        self.assertIn('class="badge no-data">NO DATA</span>', html_text)
+        self.assertIn('class="badge not-run">NOT RUN</span>', html_text)
+        self.assertIn('class="badge directional-neutral">DIRECTIONAL &middot; NEUTRAL</span>', html_text)
+
+    def test_partial_failure_shows_usable_of_total_not_bare_n(self):
+        pr = _partial_failure_patch_result()
+        self.assertEqual(pr["statistics"]["data"]["pairs_total"], 3)
+        self.assertEqual(pr["statistics"]["data"]["pairs_usable"], 1)
+        self.assertEqual(pr["statistics"]["n"], 1)  # sanity: n means usable, not total
+        self._build_and_write([pr], k=3)
+        html_text = self._html()
+        self.assertIn("1 of 3 paired repeats usable", html_text)
+        self.assertIn("control failed 1", html_text)
+        self.assertIn("treatment failed 1", html_text)
+        # must not silently render the bare, misleading "1 paired repeats run"
+        self.assertNotIn("1 paired repeats run", html_text)
+
+    # --- C-5: serve() must never expose anything besides the two report
+    # files, regardless of what else lives in out_dir (credentials, other
+    # scratch state) ---
+
+    def test_serve_never_exposes_files_outside_the_allow_list(self):
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=[_accepted_patch_result()], k=12,
+        )
+        report.write(rpt, self.out_dir)
+        # simulate cli.py's real layout: out_dir also holds a materialized
+        # harness home with a credentials file, plus a directory
+        (self.out_dir / "scratch").mkdir()
+        secret = self.out_dir / "scratch" / "auth.json"
+        secret.write_text('{"token": "super-secret"}', encoding="utf-8")
+
+        httpd = report.make_server(self.out_dir, host="127.0.0.1", port=0)
+        try:
+            import http.client
+            import threading
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = httpd.server_address[1]
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+
+                conn.request("GET", "/scratch/auth.json")
+                resp = conn.getresponse()
+                body = resp.read()
+                self.assertEqual(resp.status, 404)
+                self.assertNotIn(b"super-secret", body)
+
+                conn.request("GET", "/scratch/")
+                resp = conn.getresponse()
+                resp.read()
+                self.assertEqual(resp.status, 404)
+
+                conn.request("GET", "/index.html")
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, 200)
+                resp.read()
+
+                conn.request("GET", "/report.json")
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, 200)
+                resp.read()
+                conn.close()
+            finally:
+                httpd.shutdown()
+                thread.join(timeout=5)
+        finally:
+            httpd.server_close()
+
+    def test_make_server_does_not_mutate_global_tcpserver_class(self):
+        import socketserver as _ss
+        before = _ss.TCPServer.allow_reuse_address
+        httpd = report.make_server(self._write_minimal(), host="127.0.0.1", port=0)
+        try:
+            self.assertEqual(_ss.TCPServer.allow_reuse_address, before)
+        finally:
+            httpd.server_close()
+
+    def _write_minimal(self):
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=[_accepted_patch_result()], k=12,
+        )
+        report.write(rpt, self.out_dir)
+        return self.out_dir
+
+    # --- I-1: accepted with zero decided pairs must be visually qualified ---
+
+    def test_accepted_with_zero_decided_pairs_is_qualified_not_plain_green(self):
+        pr = _accepted_zero_decided_pairs_patch_result()
+        self.assertTrue(pr["gate"]["accepted"])  # sanity: gate really did accept
+        self.assertEqual(pr["statistics"]["win_rate"]["wins"], 0)
+        self.assertEqual(pr["statistics"]["win_rate"]["losses"], 0)
+        self._build_and_write([pr], k=12)
+        html_text = self._html()
+        self.assertIn('class="badge accept-provisional">ACCEPTED &middot; NO DECIDED PAIRS</span>', html_text)
+        self.assertNotIn('class="badge accept">ACCEPTED</span>', html_text)
+
+    # --- I-2: the three different Ns must be distinguishable ---
+
+    def test_repeats_and_judged_pairs_are_labeled_distinctly(self):
+        self._build_and_write([_provisional_reject_patch_result()], k=5)
+        html_text = self._html()
+        self.assertIn("5 paired repeats run", html_text)
+        self.assertIn("(5 judged pair", html_text)
+
+    # --- I-3: per-patch caveat matching must not staple the generic
+    # aggregate onto every card, and must not false-positive on short names
+
+    def test_aggregate_insufficient_samples_caveat_not_duplicated_per_card(self):
+        rpt = self._build_and_write([_provisional_reject_patch_result()], k=5)
+        aggregate = next(c for c in rpt["caveats"] if c.startswith("Point estimates only"))
+        html_text = self._html()
+        # appears once, in the persistent panel -- not also inline on the card
+        self.assertEqual(html_text.count(report._esc(aggregate)), 1)
+
+    def test_per_patch_caveat_uses_word_boundary_not_raw_substring(self):
+        pr = _provisional_reject_patch_result()
+        pr["patch"]["target"] = "rules"
+        # "rules" is a substring of "overrules" but not the same word --
+        # a raw `in` check would false-positive on this; word-boundary
+        # matching must not.
+        unrelated = "The isolation note overrules per-call token limits in this cycle"
+        specific = "rules.append for rules duplicates an existing line"
+        self._build_and_write([pr], k=5, extra_caveats=[unrelated, specific])
+        html_text = self._html()
+        self.assertIn(report._esc(specific), html_text)
+        card = html_text.split('id="p5"')[1].split("</article>")[0]
+        self.assertNotIn(report._esc(unrelated), card)
+
+    # --- I-5: dropped-before-ranking patches get real information, not one
+    # joined sentence ---
+
+    def test_dropped_patches_render_with_rationale_and_lineage(self):
+        dropped = [make_patch(
+            patch_id="d1", kind=PATCH_SKILL_TRUNCATE, target="stale-target",
+            rationale="Trims a section the analyzer flagged as bloated.",
+            expected_effect=EFFECT_SKILL_TOKENS, source_recommendation="rec-7",
+            skipped_reason="lint: line range out of bounds",
+        )]
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=[], dropped_patches=dropped, k=3,
+        )
+        joined = " ".join(rpt["caveats"])
+        self.assertIn("d1", joined)
+        self.assertIn("stale-target", joined)
+        self.assertIn("rec-7", joined)
+        self.assertIn("lint: line range out of bounds", joined)
+        self.assertIn("Trims a section the analyzer flagged as bloated.", joined)
+
+    # --- I-6: .badge.kind and regression severity chips must be theme-aware ---
+
+    def test_badge_kind_and_regression_chip_have_light_mode_tokens(self):
+        html_text = render_module_style()
+        self.assertIn("--kind-fg:", html_text)
+        self.assertIn("--sev-chip-bg:", html_text)
+        # both tokens must be redefined inside the light-mode block, not
+        # only declared once in the dark (default) :root
+        light_block = html_text.split("prefers-color-scheme: light")[1].split("}\n}")[0]
+        self.assertIn("--kind-fg:", light_block)
+        self.assertIn("--sev-chip-bg:", light_block)
+
+    # --- additional finding: sign convention + explicit direction wording ---
+
+    def test_a_real_saving_renders_good_and_says_saved_not_bad(self):
+        # skill_tokens_est: control=2000, treatment=900 -- a 1100-token
+        # SAVING on a lower_is_better metric. abs_delta = control-treatment
+        # = +1100 (stats.py convention); must render "good"/"saved", never
+        # "bad" with an unqualified "+55.0%" that reads as an increase.
+        self._build_and_write([_accepted_patch_result()], k=12)
+        html_text = self._html()
+        self.assertIn('tr class="good hl"', html_text)
+        self.assertNotIn('tr class="bad hl"', html_text)
+        self.assertIn("+1,100.00 saved", html_text)
+
+    def test_a_real_regression_renders_bad_and_says_cost_more(self):
+        grades = _synthetic_grades(12, skill_tokens_improvement=-1100, verdict="control", consistent=True)
+        pr = _patch_result(
+            "p12", "worse-skill", grades, rationale="test",
+            verdict_line="Regresses.",
+        )
+        self._build_and_write([pr], k=12)
+        html_text = self._html()
+        self.assertIn('tr class="bad hl"', html_text)
+        self.assertIn("cost more", html_text)
+
+    # --- Minors worth a regression test ---
+
+    def test_esc_none_is_empty_not_a_dash(self):
+        self.assertEqual(report._esc(None), "")
+
+    def test_pass_k_zero_runs_has_sane_message(self):
+        pk_line = report._pass_k_line({"pass_k": {"value": None, "n": 0, "c": 0, "k": 0, "degenerate": False, "note": "insufficient_samples"}})
+        self.assertIn("no runs completed", pk_line)
+        self.assertNotIn("pass&#94;0", pk_line)
+
+    def test_zero_width_ci_flagged_as_degenerate(self):
+        text = report._interval_text({"bootstrap": {"lo": 50.0, "hi": 50.0, "note": None, "level": 0.95}})
+        self.assertIn("[50.00, 50.00]", text)
+        self.assertIn("degenerate", text)
+
+    def test_no_script_tag_in_output(self):
+        self._build_and_write([_accepted_patch_result()], k=12)
+        html_text = self._html()
+        self.assertNotIn("<script>", html_text.replace("<script></script>", ""))
+
+
+def render_module_style():
+    """The raw _STYLE string, for CSS-structure assertions that don't need
+    a full report build."""
+    return report._STYLE
 
 
 class ServeTests(unittest.TestCase):
