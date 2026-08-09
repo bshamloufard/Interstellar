@@ -1,0 +1,263 @@
+{
+  "traces": [
+    {
+      "file": "skill_bloat_019fe41b.json",
+      "scenario": "skill_bloat",
+      "expects": "truncate",
+      "session_id": "019fe41b-a681-7d91-a30b-80e097b8ffb1",
+      "spans": 13,
+      "turns": 1,
+      "tools": 3,
+      "skills": 1,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 728,
+      "cost_usd": 0.0570984
+    },
+    {
+      "file": "skill_lean_019fe41c.json",
+      "scenario": "skill_lean",
+      "expects": "keep",
+      "session_id": "019fe41c-0a49-77a0-be0e-656a469e6308",
+      "spans": 15,
+      "turns": 1,
+      "tools": 5,
+      "skills": 1,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.0621748
+    },
+    {
+      "file": "skill_underspecified_019fe41c.json",
+      "scenario": "skill_underspecified",
+      "expects": "add_lines",
+      "session_id": "019fe41c-5a72-7a62-90bb-b57466b108b9",
+      "spans": 14,
+      "turns": 1,
+      "tools": 4,
+      "skills": 1,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.0517756
+    },
+    {
+      "file": "tool_thrash_019fe41c.json",
+      "scenario": "tool_thrash",
+      "expects": "redundant_calls",
+      "session_id": "019fe41c-9077-7981-b1a7-ee9ffcb60ea0",
+      "spans": 16,
+      "turns": 1,
+      "tools": 6,
+      "skills": 0,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.063402
+    },
+    {
+      "file": "subagent_spawn_019fe41c.json",
+      "scenario": "subagent_spawn",
+      "expects": "subagent_overhead",
+      "session_id": "019fe41c-ce18-7631-ab16-7377a6d161d9",
+      "spans": 14,
+      "turns": 1,
+      "tools": 4,
+      "skills": 0,
+      "subagents": 1,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.0739036
+    },
+    {
+      "file": "mcp_slow_019fe41d.json",
+      "scenario": "mcp_slow",
+      "expects": "mcp_latency",
+      "session_id": "019fe41d-2a8f-7aa2-8c68-ddb4d62d980f",
+      "spans": 12,
+      "turns": 1,
+      "tools": 2,
+      "skills": 0,
+      "subagents": 0,
+      "mcp_calls": 1,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.0711352
+    },
+    {
+      "file": "real_skill_bloat_019fe41d.json",
+      "scenario": "real_skill_bloat",
+      "expects": "truncate",
+      "session_id": "019fe41d-5f31-7bc2-a948-9718f60269aa",
+      "spans": 16,
+      "turns": 1,
+      "tools": 6,
+      "skills": 1,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 294,
+      "cost_usd": 0.0664768
+    },
+    {
+      "file": "real_skill_lean_019fe41e.json",
+      "scenario": "real_skill_lean",
+      "expects": "keep",
+      "session_id": "019fe41e-23c1-7b90-be76-d83d051beeab",
+      "spans": 17,
+      "turns": 1,
+      "tools": 7,
+      "skills": 1,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 42,
+      "cost_usd": 0.060112
+    },
+    {
+      "file": "real_skill_debug_019fe41e.json",
+      "scenario": "real_skill_debug",
+      "expects": "truncate",
+      "session_id": "019fe41e-860d-7660-a3db-aec09c2996e6",
+      "spans": 17,
+      "turns": 1,
+      "tools": 7,
+      "skills": 1,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 717,
+      "cost_usd": 0.0659332
+    },
+    {
+      "file": "mcp_filesystem_019fe41e.json",
+      "scenario": "mcp_filesystem",
+      "expects": "mcp_latency",
+      "session_id": "019fe41e-db4b-7da1-99ce-772cb10dea4e",
+      "spans": 13,
+      "turns": 1,
+      "tools": 3,
+      "skills": 0,
+      "subagents": 0,
+      "mcp_calls": 2,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.0520164
+    },
+    {
+      "file": "mcp_unused_fleet_019fe41f.json",
+      "scenario": "mcp_unused_fleet",
+      "expects": "mcp_remove",
+      "session_id": "019fe41f-0675-7160-a8c4-cef32335f91f",
+      "spans": 10,
+      "turns": 1,
+      "tools": 0,
+      "skills": 0,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.0054132
+    },
+    {
+      "file": "skill_slash_invoke_019fe41f.json",
+      "scenario": "skill_slash_invoke",
+      "expects": "truncate",
+      "session_id": "019fe41f-1872-7501-afc1-55cf3b875a5a",
+      "spans": 15,
+      "turns": 1,
+      "tools": 5,
+      "skills": 1,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 255,
+      "cost_usd": 0.0523592
+    },
+    {
+      "file": "baseline_clean_019fe41f.json",
+      "scenario": "baseline_clean",
+      "expects": "clean",
+      "session_id": "019fe41f-647f-7753-9d57-e551b1e07f59",
+      "spans": 13,
+      "turns": 1,
+      "tools": 3,
+      "skills": 0,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.0442156
+    },
+    {
+      "file": "big_output_019fe41f.json",
+      "scenario": "big_output",
+      "expects": "truncate_tool_output",
+      "session_id": "019fe41f-839b-7f01-b6c4-2df3e9e565d1",
+      "spans": 11,
+      "turns": 1,
+      "tools": 1,
+      "skills": 0,
+      "subagents": 0,
+      "mcp_calls": 0,
+      "skill_wasted_tokens": 0,
+      "cost_usd": 0.0534856
+    }
+  ],
+  "coverage": {
+    "skill_truncate": 4,
+    "skill_duplicate_sections": 2,
+    "skill_keep": 2,
+    "idle_mcp_server": 14,
+    "mcp_called": 2,
+    "subagent_spawn": 1,
+    "duplicate_tool_calls": 1,
+    "large_tool_output": 6,
+    "permission_wait": 2,
+    "failed_mcp_server": 14,
+    "slow_mcp_connect": 0,
+    "native_skill_event": 7,
+    "control_clean": 6
+  },
+  "missing_coverage": [
+    "slow_mcp_connect"
+  ],
+  "skill_ground_truth": {
+    "py-import-hygiene": {
+      "expected_verdict": "keep",
+      "why": "Lean body, every line actionable, invoked during the run.",
+      "bytes": 550,
+      "lines": 18,
+      "tokens_est": 137
+    },
+    "strict-audit": {
+      "expected_verdict": "truncate",
+      "why": "Only the 6-line Procedure section is used; the rest is history, philosophy, deprecated conventions, glossary and further reading.",
+      "bytes": 5832,
+      "lines": 126,
+      "tokens_est": 1458
+    },
+    "changelog-entry": {
+      "expected_verdict": "add_lines",
+      "why": "Never says WHICH file to edit or how to handle an existing entry, so the agent burns tool calls discovering it.",
+      "bytes": 230,
+      "lines": 12,
+      "tokens_est": 57
+    },
+    "release-notes": {
+      "expected_verdict": "remove",
+      "why": "Never invoked in any session; pure context tax.",
+      "bytes": 1766,
+      "lines": 89,
+      "tokens_est": 441
+    },
+    "db-migrate": {
+      "expected_verdict": "remove",
+      "why": "Never invoked in any session; pure context tax.",
+      "bytes": 1718,
+      "lines": 89,
+      "tokens_est": 429
+    },
+    "k8s-deploy": {
+      "expected_verdict": "remove",
+      "why": "Never invoked in any session; pure context tax.",
+      "bytes": 1980,
+      "lines": 89,
+      "tokens_est": 495
+    }
+  },
+  "total_cost_usd": 0.7795
+}

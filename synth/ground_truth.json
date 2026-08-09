@@ -1,0 +1,46 @@
+{
+  "skills": {
+    "py-import-hygiene": {
+      "expected_verdict": "keep",
+      "why": "Lean body, every line actionable, invoked during the run.",
+      "bytes": 550,
+      "lines": 18,
+      "tokens_est": 137
+    },
+    "strict-audit": {
+      "expected_verdict": "truncate",
+      "why": "Only the 6-line Procedure section is used; the rest is history, philosophy, deprecated conventions, glossary and further reading.",
+      "bytes": 5832,
+      "lines": 126,
+      "tokens_est": 1458
+    },
+    "changelog-entry": {
+      "expected_verdict": "add_lines",
+      "why": "Never says WHICH file to edit or how to handle an existing entry, so the agent burns tool calls discovering it.",
+      "bytes": 230,
+      "lines": 12,
+      "tokens_est": 57
+    },
+    "release-notes": {
+      "expected_verdict": "remove",
+      "why": "Never invoked in any session; pure context tax.",
+      "bytes": 1766,
+      "lines": 89,
+      "tokens_est": 441
+    },
+    "db-migrate": {
+      "expected_verdict": "remove",
+      "why": "Never invoked in any session; pure context tax.",
+      "bytes": 1718,
+      "lines": 89,
+      "tokens_est": 429
+    },
+    "k8s-deploy": {
+      "expected_verdict": "remove",
+      "why": "Never invoked in any session; pure context tax.",
+      "bytes": 1980,
+      "lines": 89,
+      "tokens_est": 495
+    }
+  }
+}

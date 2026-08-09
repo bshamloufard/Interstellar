@@ -1,0 +1,997 @@
+{
+  "schema_version": "1",
+  "session": {
+    "session_id": "019fe41b-a681-7d91-a30b-80e097b8ffb1",
+    "source": "grok-build",
+    "cwd": "/Users/sentorcc/Interstellar/synth/workspace",
+    "title": "Strict Audit Skill on app.py",
+    "model": "grok-4.5",
+    "started_at": "2026-08-09T01:20:45.321991Z",
+    "duration_ms": 23521,
+    "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41b-a681-7d91-a30b-80e097b8ffb1"
+  },
+  "spans": [
+    {
+      "id": "mcpconn-excalidraw",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect excalidraw",
+      "t_start_ms": 1018,
+      "duration_ms": 366,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_connected",
+        "server": "excalidraw",
+        "tool_count": 5,
+        "transport": "http",
+        "phase": "startup"
+      }
+    },
+    {
+      "id": "mcpconn-memory",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect memory",
+      "t_start_ms": 1018,
+      "duration_ms": 459,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_connected",
+        "server": "memory",
+        "tool_count": 9,
+        "transport": "stdio",
+        "phase": "startup"
+      }
+    },
+    {
+      "id": "mcpconn-filesystem",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect filesystem",
+      "t_start_ms": 1018,
+      "duration_ms": 533,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_connected",
+        "server": "filesystem",
+        "tool_count": 14,
+        "transport": "stdio",
+        "phase": "startup"
+      }
+    },
+    {
+      "id": "mcpconn-everything",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect everything",
+      "t_start_ms": 1018,
+      "duration_ms": 534,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_connected",
+        "server": "everything",
+        "tool_count": 13,
+        "transport": "stdio",
+        "phase": "startup"
+      }
+    },
+    {
+      "id": "mcpconn-sequential-thinking",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect sequential-thinking",
+      "t_start_ms": 1018,
+      "duration_ms": 567,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_connected",
+        "server": "sequential-thinking",
+        "tool_count": 1,
+        "transport": "stdio",
+        "phase": "startup"
+      }
+    },
+    {
+      "id": "mcpfail-time",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect time FAILED",
+      "t_start_ms": 1018,
+      "duration_ms": 688,
+      "duration_source": "measured",
+      "status": "error",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_failed",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'time' handshake failed: connection closed: initialize response"
+      }
+    },
+    {
+      "id": "mcpconn-runpod",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect runpod",
+      "t_start_ms": 1018,
+      "duration_ms": 718,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_connected",
+        "server": "runpod",
+        "tool_count": 54,
+        "transport": "stdio",
+        "phase": "startup"
+      }
+    },
+    {
+      "id": "mcpfail-git",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect git FAILED",
+      "t_start_ms": 1018,
+      "duration_ms": 741,
+      "duration_source": "measured",
+      "status": "error",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_failed",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'git' handshake failed: connection closed: initialize response"
+      }
+    },
+    {
+      "id": "mcpfail-fetch",
+      "parent_id": null,
+      "kind": "mcp",
+      "name": "connect fetch FAILED",
+      "t_start_ms": 1018,
+      "duration_ms": 748,
+      "duration_source": "measured",
+      "status": "error",
+      "tokens": {},
+      "attrs": {
+        "event": "mcp_server_failed",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'fetch' handshake failed: connection closed: initialize response"
+      }
+    },
+    {
+      "id": "turn-0",
+      "parent_id": null,
+      "kind": "llm",
+      "name": "turn 0",
+      "t_start_ms": 1020,
+      "duration_ms": 22501,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "model": "grok-4.5",
+        "turn_number": 0,
+        "yolo": true,
+        "messages_at_start": 3,
+        "outcome": "completed"
+      }
+    },
+    {
+      "id": "call-153c5f2a-2613-45ca-9378-3f575d4b897a-0",
+      "parent_id": "turn-0",
+      "kind": "skill",
+      "name": "read_file",
+      "t_start_ms": 3123,
+      "duration_ms": 0,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "tool": "read_file",
+        "outcome": "success",
+        "permission_wait_ms": 0,
+        "args_bytes": 69,
+        "result_bytes": 5873,
+        "result_tokens_est": 1468,
+        "args_preview": "{\"target_file\": \"/Users/sentorcc/.grok/skills/strict-audit/SKILL.md\"}",
+        "result_preview": "1\u2192---\nname: strict-audit\ndescription: Run a strict code quality audit flagging long functions and complex conditionals.\nx-synthetic-fixture: true\n---\n\n# Strict Code Audit\n\n## Procedure\n10\u2192\n1. List the changed files.\n2. For each file, flag any function longer than 60 lines.\n3. Flag any conditional with more than 3 clauses.\n4. Report findings most severe first. Cite `file:line`.\n\n## Historical Conte",
+        "source": "native_event",
+        "derived_from": null,
+        "trigger": "skill_md_read",
+        "plugin_source": null,
+        "skill": "strict-audit",
+        "path": "/Users/sentorcc/.grok/skills/strict-audit/SKILL.md",
+        "skill_bytes": 5832,
+        "skill_tokens_est": 1458,
+        "skill_lines": 125,
+        "size_source": "native_event",
+        "sections": [
+          {
+            "section": "(preamble)",
+            "start_line": 1,
+            "end_line": 8,
+            "lines": 8,
+            "bytes": 169,
+            "tokens_est": 42,
+            "distinctive_terms": 8,
+            "terms_referenced": 4,
+            "referenced": true,
+            "sample_hits": [
+              "conditionals",
+              "functions",
+              "strict",
+              "strict-audit"
+            ],
+            "duplicate_of_section": null
+          },
+          {
+            "section": "Procedure",
+            "start_line": 9,
+            "end_line": 15,
+            "lines": 7,
+            "bytes": 205,
+            "tokens_est": 51,
+            "distinctive_terms": 8,
+            "terms_referenced": 8,
+            "referenced": true,
+            "sample_hits": [
+              "changed",
+              "clauses",
+              "conditional",
+              "findings",
+              "first"
+            ],
+            "duplicate_of_section": null
+          },
+          {
+            "section": "Historical Context",
+            "start_line": 16,
+            "end_line": 24,
+            "lines": 9,
+            "bytes": 493,
+            "tokens_est": 123,
+            "distinctive_terms": 30,
+            "terms_referenced": 1,
+            "referenced": true,
+            "sample_hits": [
+              "which"
+            ],
+            "duplicate_of_section": null
+          },
+          {
+            "section": "Rationale and Philosophy",
+            "start_line": 25,
+            "end_line": 32,
+            "lines": 8,
+            "bytes": 420,
+            "tokens_est": 105,
+            "distinctive_terms": 26,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": null
+          },
+          {
+            "section": "Team Conventions (deprecated)",
+            "start_line": 33,
+            "end_line": 38,
+            "lines": 6,
+            "bytes": 342,
+            "tokens_est": 85,
+            "distinctive_terms": 23,
+            "terms_referenced": 1,
+            "referenced": true,
+            "sample_hits": [
+              "limit"
+            ],
+            "duplicate_of_section": null
+          },
+          {
+            "section": "Glossary",
+            "start_line": 39,
+            "end_line": 45,
+            "lines": 7,
+            "bytes": 311,
+            "tokens_est": 77,
+            "distinctive_terms": 26,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": null
+          },
+          {
+            "section": "Further Reading",
+            "start_line": 46,
+            "end_line": 51,
+            "lines": 6,
+            "bytes": 247,
+            "tokens_est": 61,
+            "distinctive_terms": 19,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": null
+          },
+          {
+            "section": "Historical Context",
+            "start_line": 52,
+            "end_line": 60,
+            "lines": 9,
+            "bytes": 493,
+            "tokens_est": 123,
+            "distinctive_terms": 30,
+            "terms_referenced": 1,
+            "referenced": true,
+            "sample_hits": [
+              "which"
+            ],
+            "duplicate_of_section": "Historical Context"
+          },
+          {
+            "section": "Rationale and Philosophy",
+            "start_line": 61,
+            "end_line": 67,
+            "lines": 7,
+            "bytes": 419,
+            "tokens_est": 104,
+            "distinctive_terms": 26,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": "Rationale and Philosophy"
+          },
+          {
+            "section": "Team Conventions (deprecated)",
+            "start_line": 68,
+            "end_line": 74,
+            "lines": 7,
+            "bytes": 343,
+            "tokens_est": 85,
+            "distinctive_terms": 23,
+            "terms_referenced": 1,
+            "referenced": true,
+            "sample_hits": [
+              "limit"
+            ],
+            "duplicate_of_section": "Team Conventions (deprecated)"
+          },
+          {
+            "section": "Glossary",
+            "start_line": 75,
+            "end_line": 81,
+            "lines": 7,
+            "bytes": 311,
+            "tokens_est": 77,
+            "distinctive_terms": 26,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": "Glossary"
+          },
+          {
+            "section": "Further Reading",
+            "start_line": 82,
+            "end_line": 86,
+            "lines": 5,
+            "bytes": 246,
+            "tokens_est": 61,
+            "distinctive_terms": 19,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": "Further Reading"
+          },
+          {
+            "section": "Historical Context",
+            "start_line": 87,
+            "end_line": 95,
+            "lines": 9,
+            "bytes": 493,
+            "tokens_est": 123,
+            "distinctive_terms": 30,
+            "terms_referenced": 1,
+            "referenced": true,
+            "sample_hits": [
+              "which"
+            ],
+            "duplicate_of_section": "Historical Context"
+          },
+          {
+            "section": "Rationale and Philosophy",
+            "start_line": 96,
+            "end_line": 103,
+            "lines": 8,
+            "bytes": 420,
+            "tokens_est": 105,
+            "distinctive_terms": 26,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": "Rationale and Philosophy"
+          },
+          {
+            "section": "Team Conventions (deprecated)",
+            "start_line": 104,
+            "end_line": 110,
+            "lines": 7,
+            "bytes": 343,
+            "tokens_est": 85,
+            "distinctive_terms": 23,
+            "terms_referenced": 1,
+            "referenced": true,
+            "sample_hits": [
+              "limit"
+            ],
+            "duplicate_of_section": "Team Conventions (deprecated)"
+          },
+          {
+            "section": "Glossary",
+            "start_line": 111,
+            "end_line": 117,
+            "lines": 7,
+            "bytes": 311,
+            "tokens_est": 77,
+            "distinctive_terms": 26,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": "Glossary"
+          },
+          {
+            "section": "Further Reading",
+            "start_line": 118,
+            "end_line": 122,
+            "lines": 5,
+            "bytes": 246,
+            "tokens_est": 61,
+            "distinctive_terms": 19,
+            "terms_referenced": 0,
+            "referenced": false,
+            "sample_hits": [],
+            "duplicate_of_section": "Further Reading"
+          }
+        ],
+        "unreferenced_sections": 9,
+        "unreferenced_tokens_est": 728,
+        "unreferenced_line_ranges": [
+          [
+            25,
+            32
+          ],
+          [
+            39,
+            45
+          ],
+          [
+            46,
+            51
+          ],
+          [
+            61,
+            67
+          ],
+          [
+            75,
+            81
+          ],
+          [
+            82,
+            86
+          ],
+          [
+            96,
+            103
+          ],
+          [
+            111,
+            117
+          ],
+          [
+            118,
+            122
+          ]
+        ],
+        "repeated_sections": 10,
+        "repeated_tokens_est": 901,
+        "repeated_line_ranges": [
+          [
+            52,
+            60
+          ],
+          [
+            61,
+            67
+          ],
+          [
+            68,
+            74
+          ],
+          [
+            75,
+            81
+          ],
+          [
+            82,
+            86
+          ],
+          [
+            87,
+            95
+          ],
+          [
+            96,
+            103
+          ],
+          [
+            104,
+            110
+          ],
+          [
+            111,
+            117
+          ],
+          [
+            118,
+            122
+          ]
+        ]
+      }
+    },
+    {
+      "id": "call-e9909566-6c12-4701-90af-9daec4a4635a-1",
+      "parent_id": "turn-0",
+      "kind": "tool",
+      "name": "read_file",
+      "t_start_ms": 17078,
+      "duration_ms": 9,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "tool": "read_file",
+        "outcome": "success",
+        "permission_wait_ms": 0,
+        "args_bytes": 70,
+        "result_bytes": 270,
+        "result_tokens_est": 67,
+        "args_preview": "{\"target_file\": \"/Users/sentorcc/Interstellar/synth/workspace/app.py\"}",
+        "result_preview": "1\u2192def parse_config(raw):\n    out = {}\n    for line in raw.split(\"\\n\"):\n        if not line or line.startswith(\"#\"):\n            continue\n        k, v = line.split(\"=\")\n        out[k.strip()] = v.strip()\n    return out\n\n10\u2192def main():\n    print(parse_config(\"a=1\\nb=2\"))\n"
+      }
+    },
+    {
+      "id": "call-e9909566-6c12-4701-90af-9daec4a4635a-2",
+      "parent_id": "turn-0",
+      "kind": "tool",
+      "name": "run_terminal_command",
+      "t_start_ms": 17078,
+      "duration_ms": 2114,
+      "duration_source": "measured",
+      "status": "ok",
+      "tokens": {},
+      "attrs": {
+        "tool": "run_terminal_command",
+        "outcome": "success",
+        "permission_wait_ms": 0,
+        "args_bytes": 3508,
+        "result_bytes": 192,
+        "result_tokens_est": 48,
+        "args_preview": "{\"command\": \"wc -l app.py && python3 -c \\\"\\nimport ast\\nimport sys\\n\\nwith open('app.py') as f:\\n    src = f.read()\\n    lines = src.splitlines()\\n\\ntree = ast.parse(src)\\n\\n# Function lengths\\nprint('=== FUNCTIONS ===')\\nfor node in ast.walk(tree):\\n    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):\\n        # end_lineno is inclusive\\n        start = node.lineno\\n        end = node",
+        "result_preview": "exit: 0\n      11 app.py\n=== FUNCTIONS ===\n   8 lines  parse_config  app.py:1-8\n   2 lines  main  app.py:10-11\n\n=== COMPLEX CONDITIONALS (>3 clauses) ===\n\n=== RAW and/or chains (heuristic) ===\n"
+      }
+    }
+  ],
+  "inventory": {
+    "mcp_servers": {
+      "excalidraw": {
+        "transport": "http",
+        "tool_count": 5,
+        "connect_ms": 366,
+        "tools": [
+          "read_me",
+          "create_view",
+          "export_to_excalidraw",
+          "save_checkpoint",
+          "read_checkpoint"
+        ],
+        "calls": 0
+      },
+      "memory": {
+        "transport": "stdio",
+        "tool_count": 9,
+        "connect_ms": 459,
+        "tools": [
+          "create_entities",
+          "create_relations",
+          "add_observations",
+          "delete_entities",
+          "delete_observations",
+          "delete_relations",
+          "read_graph",
+          "search_nodes",
+          "open_nodes"
+        ],
+        "calls": 0
+      },
+      "filesystem": {
+        "transport": "stdio",
+        "tool_count": 14,
+        "connect_ms": 533,
+        "tools": [
+          "read_file",
+          "read_text_file",
+          "read_media_file",
+          "read_multiple_files",
+          "write_file",
+          "edit_file",
+          "create_directory",
+          "list_directory",
+          "list_directory_with_sizes",
+          "directory_tree",
+          "move_file",
+          "search_files",
+          "get_file_info",
+          "list_allowed_directories"
+        ],
+        "calls": 0
+      },
+      "everything": {
+        "transport": "stdio",
+        "tool_count": 13,
+        "connect_ms": 534,
+        "tools": [
+          "echo",
+          "get-annotated-message",
+          "get-env",
+          "get-resource-links",
+          "get-resource-reference",
+          "get-structured-content",
+          "get-sum",
+          "get-tiny-image",
+          "gzip-file-as-resource",
+          "toggle-simulated-logging",
+          "toggle-subscriber-updates",
+          "trigger-long-running-operation",
+          "simulate-research-query"
+        ],
+        "calls": 0
+      },
+      "sequential-thinking": {
+        "transport": "stdio",
+        "tool_count": 1,
+        "connect_ms": 567,
+        "tools": [
+          "sequentialthinking"
+        ],
+        "calls": 0
+      },
+      "runpod": {
+        "transport": "stdio",
+        "tool_count": 54,
+        "connect_ms": 718,
+        "tools": [
+          "list-gpu-types",
+          "list-data-centers",
+          "list-cpu-types",
+          "get-gpu-type",
+          "get-cpu-type",
+          "get-capacity",
+          "get-data-center",
+          "list-hub-repos",
+          "deploy-hub-repo",
+          "list-public-endpoints",
+          "list-pods",
+          "get-pod",
+          "create-pod",
+          "update-pod",
+          "start-pod",
+          "stop-pod",
+          "restart-pod",
+          "stream-pod-logs",
+          "delete-pod",
+          "list-endpoints",
+          "get-endpoint",
+          "create-endpoint",
+          "update-endpoint",
+          "delete-endpoint",
+          "list-endpoint-releases",
+          "list-endpoint-workers",
+          "stream-worker-logs",
+          "set-endpoint-gpus",
+          "run-endpoint",
+          "runsync-endpoint",
+          "get-job-status",
+          "stream-job",
+          "cancel-job",
+          "retry-job",
+          "endpoint-health",
+          "purge-endpoint-queue",
+          "list-templates",
+          "get-template",
+          "create-template",
+          "update-template",
+          "delete-template",
+          "list-network-volumes",
+          "get-network-volume",
+          "create-network-volume",
+          "update-network-volume",
+          "delete-network-volume",
+          "list-container-registry-auths",
+          "get-container-registry-auth",
+          "create-container-registry-auth",
+          "delete-container-registry-auth",
+          "list-registry-delegations",
+          "create-registry-delegation",
+          "delete-registry-delegation",
+          "get-billing"
+        ],
+        "calls": 0
+      }
+    },
+    "skills_loaded": [
+      {
+        "skill": "strict-audit",
+        "tokens_est": 1458,
+        "unreferenced_tokens_est": 728,
+        "sections": 17,
+        "dead_sections": 9,
+        "repeated_sections": 10,
+        "repeated_tokens_est": 901
+      }
+    ],
+    "tools_used": {
+      "read_file": 2,
+      "run_terminal_command": 1
+    },
+    "totals": {
+      "mcp_servers": 6,
+      "mcp_tools_exposed": 96,
+      "mcp_connect_ms": 3177,
+      "skills_loaded": 1,
+      "skill_tokens_est": 1458,
+      "skill_wasted_tokens_est": 728
+    }
+  },
+  "metrics": {
+    "counts": {
+      "turns": 1,
+      "tool_calls": 3,
+      "skill_loads": 1,
+      "subagent_spawns": 0,
+      "mcp_calls": 0
+    },
+    "timing": {
+      "total_tool_ms": 2123,
+      "total_permission_wait_ms": 0,
+      "mcp_startup_ms": 3177,
+      "slowest_mcp_connect": [
+        {
+          "server": "runpod",
+          "ms": 718,
+          "tools": 54,
+          "calls": 0
+        },
+        {
+          "server": "sequential-thinking",
+          "ms": 567,
+          "tools": 1,
+          "calls": 0
+        },
+        {
+          "server": "everything",
+          "ms": 534,
+          "tools": 13,
+          "calls": 0
+        },
+        {
+          "server": "filesystem",
+          "ms": 533,
+          "tools": 14,
+          "calls": 0
+        },
+        {
+          "server": "memory",
+          "ms": 459,
+          "tools": 9,
+          "calls": 0
+        },
+        {
+          "server": "excalidraw",
+          "ms": 366,
+          "tools": 5,
+          "calls": 0
+        }
+      ],
+      "slowest": [
+        {
+          "tool": "run_terminal_command",
+          "ms": 2114,
+          "kind": "tool",
+          "span": "call-e9909566-6c12-4701-90af-9daec4a4635a-2"
+        },
+        {
+          "tool": "read_file",
+          "ms": 9,
+          "kind": "tool",
+          "span": "call-e9909566-6c12-4701-90af-9daec4a4635a-1"
+        }
+      ]
+    },
+    "context_cost": {
+      "tool_result_tokens_est": 1583,
+      "skill_tokens_est": 1458,
+      "skill_wasted_tokens_est": 728,
+      "largest_results": [
+        {
+          "tool": "read_file",
+          "bytes": 5873,
+          "span": "call-153c5f2a-2613-45ca-9378-3f575d4b897a-0"
+        },
+        {
+          "tool": "read_file",
+          "bytes": 270,
+          "span": "call-e9909566-6c12-4701-90af-9daec4a4635a-1"
+        },
+        {
+          "tool": "run_terminal_command",
+          "bytes": 192,
+          "span": "call-e9909566-6c12-4701-90af-9daec4a4635a-2"
+        }
+      ]
+    },
+    "duplicate_calls": [],
+    "discovery_after_skill_load": [],
+    "idle_mcp_servers": [
+      {
+        "server": "excalidraw",
+        "tools_exposed": 5,
+        "connect_ms": 366
+      },
+      {
+        "server": "memory",
+        "tools_exposed": 9,
+        "connect_ms": 459
+      },
+      {
+        "server": "filesystem",
+        "tools_exposed": 14,
+        "connect_ms": 533
+      },
+      {
+        "server": "everything",
+        "tools_exposed": 13,
+        "connect_ms": 534
+      },
+      {
+        "server": "sequential-thinking",
+        "tools_exposed": 1,
+        "connect_ms": 567
+      },
+      {
+        "server": "runpod",
+        "tools_exposed": 54,
+        "connect_ms": 718
+      }
+    ],
+    "failed_mcp_servers": [
+      {
+        "server": "time",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'time' handshake failed: connection closed: initialize response",
+        "wasted_ms": 688
+      },
+      {
+        "server": "git",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'git' handshake failed: connection closed: initialize response",
+        "wasted_ms": 741
+      },
+      {
+        "server": "fetch",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'fetch' handshake failed: connection closed: initialize response",
+        "wasted_ms": 748
+      }
+    ],
+    "skill_detail": [
+      {
+        "skill": "strict-audit",
+        "tokens_est": 1458,
+        "unreferenced_tokens_est": 728,
+        "sections": 17,
+        "dead_sections": 9,
+        "repeated_sections": 10,
+        "repeated_tokens_est": 901
+      }
+    ],
+    "subagents": []
+  },
+  "warnings": [
+    "1 native skill_activated event(s); skill spans are read, not derived"
+  ],
+  "installed_not_loaded": [
+    {
+      "skill": "algorithmic-art",
+      "bytes": 2697,
+      "tokens_est": 674
+    },
+    {
+      "skill": "brand-guidelines",
+      "bytes": 1606,
+      "tokens_est": 401
+    },
+    {
+      "skill": "db-migrate",
+      "bytes": 1718,
+      "tokens_est": 429
+    },
+    {
+      "skill": "ios-app-release",
+      "bytes": 3109,
+      "tokens_est": 777
+    },
+    {
+      "skill": "k8s-deploy",
+      "bytes": 1980,
+      "tokens_est": 495
+    },
+    {
+      "skill": "refactoring-patterns",
+      "bytes": 6023,
+      "tokens_est": 1505
+    },
+    {
+      "skill": "release-notes",
+      "bytes": 1766,
+      "tokens_est": 441
+    },
+    {
+      "skill": "requesting-code-review",
+      "bytes": 1705,
+      "tokens_est": 426
+    },
+    {
+      "skill": "security-review",
+      "bytes": 9343,
+      "tokens_est": 2335
+    },
+    {
+      "skill": "slack-gif-creator",
+      "bytes": 1908,
+      "tokens_est": 477
+    },
+    {
+      "skill": "test-driven-development",
+      "bytes": 1816,
+      "tokens_est": 454
+    },
+    {
+      "skill": "using-git-worktrees",
+      "bytes": 2271,
+      "tokens_est": 567
+    },
+    {
+      "skill": "writing-plans",
+      "bytes": 5720,
+      "tokens_est": 1430
+    }
+  ],
+  "ground_truth": {
+    "scenario": "skill_bloat",
+    "expects": {
+      "skill": "strict-audit",
+      "verdict": "truncate",
+      "note": "loads 5.8KB but only the 6-line Procedure section drives behaviour"
+    },
+    "cost_usd": 0.0570984,
+    "turns": 3
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "generated_by": "run_corpus.py",
+  "grok_version": "grok 1.0.0 (8a14c91) [stable]",
+  "workspace": "/Users/sentorcc/Interstellar/synth/workspace",
+  "total_cost_usd": 0.0529,
+  "sessions": [
+    {
+      "scenario": "big_output",
+      "expects": {
+        "verdict": "truncate_tool_output",
+        "note": "large terminal result pulled wholesale into context"
+      },
+      "prompt": "Run 'cat /Users/sentorcc/Interstellar/Cargo.toml' and then name the three workspace members whose paths sort last alphabetically. You must read the actual file contents, do not use grep, sort, tail or any other filter to narrow it down first.",
+      "wall_s": 12.8,
+      "session_id": "019fe3dd-c00c-7b83-bca2-4cc8d654b98c",
+      "turns": 2,
+      "cost_usd": 0.0528904,
+      "usage": {
+        "input_tokens": 22010,
+        "cache_read_input_tokens": 16128,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 672,
+        "reasoning_tokens": 555,
+        "total_tokens": 38810
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe3dd-c00c-7b83-bca2-4cc8d654b98c"
+    }
+  ]
+}

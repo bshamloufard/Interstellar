@@ -1,0 +1,166 @@
+# =============================================================================
+# STAGING FILE — DO NOT APPLY AUTOMATICALLY
+# =============================================================================
+# Proposed [mcp_servers.*] block for ~/.grok/config.toml (user scope) or a
+# project-scoped .grok/config.toml. Merge these tables into the existing file;
+# do NOT replace it (~/.grok/config.toml currently holds [marketplace] only).
+#
+# Schema source of truth:
+#   crates/codegen/xai-grok-config-types/src/mcp.rs:34-69   (transport enum)
+#   crates/codegen/xai-grok-config-types/src/mcp.rs:215-237 (McpServerConfig)
+#   crates/codegen/xai-grok-config-types/src/mcp.rs:93-115  (KNOWN_MCP_SERVER_FIELDS)
+#   crates/codegen/xai-grok-shell/src/agent/config.rs:1417  (mcp_servers table)
+#   crates/codegen/xai-grok-pager/docs/user-guide/07-mcp-servers.md
+#
+# Transport is untagged: a `command` key => stdio, a `url` key => Streamable
+# HTTP/SSE. Setting both, or neither, will not deserialize.
+#
+# -----------------------------------------------------------------------------
+# SERVER INVENTORY
+# -----------------------------------------------------------------------------
+#  name                 transport  auth      tools  verified
+#  -------------------  ---------  --------  -----  ------------------------------
+#  filesystem           stdio      none       14    npm 2026.7.10
+#  memory               stdio      none        9    npm 2026.7.4
+#  sequential-thinking  stdio      none        1    npm 2026.7.4
+#  everything           stdio      none       19    npm 2026.7.4
+#  git                  stdio      none       12    PyPI 2026.7.10 (uvx)
+#  fetch                stdio      none        1    PyPI 2026.7.10 (uvx)
+#  time                 stdio      none        2    PyPI 2026.7.10 (uvx)
+#  context7             http       none*       2    POST /mcp -> HTTP 200 no auth
+#  github               http       REQUIRED   ~35    POST /mcp/ -> HTTP 401  <== INTENTIONAL FAILURE
+#
+#  * context7 works keyless at a lower rate limit; an API key only raises it.
+#
+# Total tools if all connect except github: 60.
+#
+# COLD START: every npx/uvx server downloads its package on first launch. The
+# default startup timeout is 30s and cold starts routinely exceed it, so each
+# stdio entry below sets startup_timeout_sec = 120. Lower it to ~15 once the
+# npx/uvx caches are warm if you want the traces to show tight startup budgets.
+# =============================================================================
+
+
+# --- filesystem -------------------------------------------------------------
+# Sandboxed file ops. Every path after the package name is an allow-listed root;
+# the server refuses anything outside them. NO AUTH. 14 tools: read_text_file,
+# read_media_file, read_multiple_files, write_file, edit_file, create_directory,
+# list_directory, list_directory_with_sizes, move_file, search_files,
+# directory_tree, get_file_info, list_allowed_directories.
+[mcp_servers.filesystem]
+command = "npx"
+args = [
+  "-y",
+  "@modelcontextprotocol/server-filesystem",
+  "/Users/sentorcc/Interstellar",
+]
+startup_timeout_sec = 120
+tool_timeout_sec = 60
+
+# --- memory -----------------------------------------------------------------
+# Knowledge-graph persistent memory, backed by a JSONL file. NO AUTH. 9 tools:
+# create_entities, create_relations, add_observations, delete_entities,
+# delete_observations, delete_relations, read_graph, search_nodes, open_nodes.
+# MEMORY_FILE_PATH is pointed at the synth dir so it does not write into the
+# npx package directory (its default).
+[mcp_servers.memory]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+env = { MEMORY_FILE_PATH = "/Users/sentorcc/Interstellar/synth/memory.jsonl" }
+startup_timeout_sec = 120
+tool_timeout_sec = 60
+
+# --- sequential-thinking ----------------------------------------------------
+# Single-tool structured reasoning scratchpad. NO AUTH. 1 tool:
+# sequential_thinking. Cheap to start, gets called repeatedly within a task —
+# good for traces with many calls against one tool.
+[mcp_servers.sequential-thinking]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+startup_timeout_sec = 120
+tool_timeout_sec = 60
+
+# --- everything -------------------------------------------------------------
+# The official reference/test server. NO AUTH. 19 tools, 4 prompts, 4 resource
+# families. The most useful server in this set for synthetic traces because it
+# deliberately exercises the hard paths: trigger-long-running-operation (slow
+# call latency), trigger-sampling-request (server-initiated sampling),
+# trigger-elicitation-request (user prompt mid-call), get-tiny-image (base64
+# image results), toggle-simulated-logging (log spam), get-resource-links.
+# Full list: echo, get-annotated-message, get-env, get-resource-links,
+# get-resource-reference, get-roots-list, gzip-file-as-resource,
+# get-structured-content, get-sum, get-tiny-image,
+# trigger-long-running-operation, toggle-simulated-logging,
+# toggle-subscriber-updates, trigger-elicitation-request, trigger-url-elicitation,
+# trigger-sampling-request, simulate-research-query,
+# trigger-sampling-request-async, trigger-elicitation-request-async.
+[mcp_servers.everything]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-everything"]
+startup_timeout_sec = 120
+# Bumped: trigger-long-running-operation is designed to run long.
+tool_timeout_sec = 180
+tool_timeouts = { "trigger-long-running-operation" = 300 }
+
+# --- git --------------------------------------------------------------------
+# Read/search/manipulate git repos. NO AUTH (local repo only). 12 tools:
+# git_status, git_diff_unstaged, git_diff_staged, git_diff, git_commit, git_add,
+# git_reset, git_log, git_create_branch, git_checkout, git_show, git_branch.
+# NOTE: PyPI-only, launched via uvx. The npm package literally named
+# "mcp-server-git" (v0.0.2) is NOT this server — do not use npx here.
+[mcp_servers.git]
+command = "uvx"
+args = ["mcp-server-git", "--repository", "/Users/sentorcc/Interstellar"]
+startup_timeout_sec = 120
+tool_timeout_sec = 60
+
+# --- fetch ------------------------------------------------------------------
+# URL -> markdown extraction. NO AUTH. 1 tool: fetch. Respects robots.txt by
+# default; pass --ignore-robots-txt in args if that gets in the way.
+# PyPI-only via uvx; the npm "mcp-server-fetch" (v0.0.2) is unrelated.
+[mcp_servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+startup_timeout_sec = 120
+tool_timeout_sec = 60
+
+# --- time -------------------------------------------------------------------
+# NO AUTH. 2 tools: get_current_time, convert_time. Fastest server in the set
+# and a good baseline for "what does a trivial MCP startup cost".
+[mcp_servers.time]
+command = "uvx"
+args = ["mcp-server-time", "--local-timezone=America/Los_Angeles"]
+startup_timeout_sec = 120
+tool_timeout_sec = 30
+
+# --- context7 ---------------------------------------------------------------
+# Remote Streamable HTTP. Live library/framework documentation lookup. Works
+# WITHOUT an API key at a reduced rate limit (verified: unauthenticated
+# initialize returns HTTP 200). 2 tools: resolve-library-id, get-library-docs.
+# The only remote server here that actually connects, so it is the one source
+# of real network-transport latency in the trace set.
+# To raise the rate limit later, add:
+#   headers = { "Authorization" = "Bearer ${CONTEXT7_API_KEY}" }
+[mcp_servers.context7]
+url = "https://mcp.context7.com/mcp"
+startup_timeout_sec = 60
+tool_timeout_sec = 60
+
+# --- github -----------------------------------------------------------------
+# ############################################################################
+# ## INTENTIONAL FAILURE — THIS SERVER WILL NOT CONNECT.                    ##
+# ## GitHub's official remote MCP server requires OAuth or a PAT. With no   ##
+# ## credential it returns HTTP 401 on initialize (verified by probe).      ##
+# ## It is here on purpose so the corpus contains a realistic auth-failure  ##
+# ## startup path. Set enabled = false to drop it from the traces.          ##
+# ############################################################################
+# Would expose roughly 35 tools across issues/PRs/code-search/actions if
+# authenticated. Short startup timeout so it fails fast instead of stalling
+# session start.
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+enabled = true
+startup_timeout_sec = 10
+tool_timeout_sec = 30
+# To make it succeed instead, supply a PAT:
+# headers = { "Authorization" = "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}" }

@@ -1,0 +1,270 @@
+{
+  "skills": {
+    "test-driven-development": {
+      "expected_verdict": "keep",
+      "why": "Lean. Five sections, all procedural, all reachable from an ordinary Python feature request.",
+      "source": "github.com/obra/superpowers/blob/main/skills/test-driven-development (real name + verbatim description)",
+      "sections": [
+        "The Iron Law",
+        "Red-Green-Refactor",
+        "Good Tests",
+        "Bug Fixes",
+        "Verification Checklist"
+      ],
+      "bytes": 1808,
+      "lines": 50,
+      "tokens_est": 452
+    },
+    "verification-before-completion": {
+      "expected_verdict": "keep",
+      "why": "Shortest skill in the set and entirely actionable; the gate applies to every task the agent finishes.",
+      "source": "github.com/obra/superpowers/blob/main/skills/verification-before-completion (real name + verbatim description)",
+      "sections": [
+        "The Iron Law",
+        "The Gate",
+        "Common Failures",
+        "What Counts as Evidence"
+      ],
+      "bytes": 1350,
+      "lines": 37,
+      "tokens_est": 337
+    },
+    "using-git-worktrees": {
+      "expected_verdict": "keep",
+      "why": "Every section is a step with a command. Directly applicable in a git workspace.",
+      "source": "github.com/obra/superpowers/blob/main/skills/using-git-worktrees (real name + verbatim description)",
+      "sections": [
+        "When to Use",
+        "Step 0 - Detect Existing Isolation",
+        "Step 1 - Create the Workspace",
+        "Step 2 - Project Setup",
+        "Step 3 - Verify a Clean Baseline",
+        "Cleanup"
+      ],
+      "bytes": 2267,
+      "lines": 71,
+      "tokens_est": 566
+    },
+    "requesting-code-review": {
+      "expected_verdict": "keep",
+      "why": "Compact checklist, no historical or philosophical padding.",
+      "source": "github.com/obra/superpowers/blob/main/skills/requesting-code-review (real name + verbatim description)",
+      "sections": [
+        "When to Use",
+        "Prepare the Diff",
+        "Write the Request",
+        "Scope the Ask",
+        "Do Not"
+      ],
+      "bytes": 1695,
+      "lines": 47,
+      "tokens_est": 423
+    },
+    "systematic-debugging": {
+      "expected_verdict": "truncate",
+      "why": "The four phases and the red flags are the working core. Quick Reference restates the phases verbatim, Origins is pure lineage, and the two rationalization/signals sections are long prose that never changes an action.",
+      "source": "github.com/obra/superpowers/blob/main/skills/systematic-debugging (real name, verbatim description, real section titles)",
+      "sections": [
+        "The Iron Law",
+        "When to Use",
+        "Phase 1 - Root Cause Investigation",
+        "Phase 2 - Pattern Analysis",
+        "Phase 3 - Hypothesis and Testing",
+        "Phase 4 - Implementation",
+        "Red Flags - Stop and Restart the Process",
+        "Common Rationalizations",
+        "Signals From Your Human Partner That You Are Doing It Wrong",
+        "Quick Reference",
+        "Origins and Influences",
+        "When the Process Reveals No Root Cause"
+      ],
+      "bytes": 6833,
+      "lines": 152,
+      "tokens_est": 1708,
+      "low_value_sections": [
+        "Common Rationalizations",
+        "Signals From Your Human Partner That You Are Doing It Wrong",
+        "Quick Reference",
+        "Origins and Influences"
+      ]
+    },
+    "code-review": {
+      "expected_verdict": "truncate",
+      "why": "The review procedure is strong; the last four sections are a spreadsheet migration story, a page of calibration philosophy, definitions the model already knows, and a Further Reading section that recommends nothing.",
+      "source": "~/.grok/bundled/skills/code-review/SKILL.md (real name + verbatim description, body modelled on it)",
+      "sections": [
+        "Core Prompt",
+        "Be Ambitious About Structural Simplification",
+        "Giant Files and Giant Functions",
+        "Spaghetti Conditions",
+        "Abstraction Quality",
+        "Naming",
+        "Comments and Docstrings",
+        "Error Handling",
+        "Concurrency and Resource Lifetime",
+        "Tests in the Diff",
+        "Performance Sanity Check",
+        "Reporting Format",
+        "Historical Notes on This Document",
+        "Philosophy of Code Quality",
+        "Glossary",
+        "Further Reading"
+      ],
+      "bytes": 10077,
+      "lines": 211,
+      "tokens_est": 2519,
+      "low_value_sections": [
+        "Historical Notes on This Document",
+        "Philosophy of Code Quality",
+        "Glossary",
+        "Further Reading"
+      ]
+    },
+    "security-review": {
+      "expected_verdict": "truncate",
+      "why": "Procedure and the per-class checks are actionable. The OWASP renaming history, the stale compliance control mapping, and the glossary are reference material that never affects a finding.",
+      "source": "Claude Code built-in /security-review (real name + verbatim description); body written from domain knowledge",
+      "sections": [
+        "Scope",
+        "Procedure",
+        "Injection",
+        "Authentication and Authorization",
+        "Secrets and Sensitive Data",
+        "Cryptography",
+        "Deserialization and File Handling",
+        "Web-Specific Checks",
+        "Multi-Tenancy",
+        "Dependencies",
+        "Reporting",
+        "Background: Why OWASP, and How the Categories Have Moved",
+        "Compliance Framework Cross-Reference",
+        "Glossary of Vulnerability Classes"
+      ],
+      "bytes": 9305,
+      "lines": 195,
+      "tokens_est": 2326,
+      "low_value_sections": [
+        "Background: Why OWASP, and How the Categories Have Moved",
+        "Compliance Framework Cross-Reference",
+        "Glossary of Vulnerability Classes"
+      ]
+    },
+    "refactoring-patterns": {
+      "expected_verdict": "truncate",
+      "why": "The smell/transform pairs are the useful part. Catalog numbering trivia, a long essay on when not to refactor, and a Related Reading section that names no reading are dead weight.",
+      "source": "github.com/karanb192/awesome-claude-skills (real catalog entry name + paraphrased description); body written from domain knowledge",
+      "sections": [
+        "What This Skill Is For",
+        "Preconditions",
+        "Smell: Long Function",
+        "Smell: Long Parameter List",
+        "Smell: Conditional Complexity",
+        "Smell: Duplicated Code",
+        "Smell: Primitive Obsession",
+        "Working Safely",
+        "The Catalog and Its Numbering",
+        "Extended Discussion: When Not to Refactor",
+        "Related Reading"
+      ],
+      "bytes": 5993,
+      "lines": 133,
+      "tokens_est": 1498,
+      "low_value_sections": [
+        "The Catalog and Its Numbering",
+        "Extended Discussion: When Not to Refactor",
+        "Related Reading"
+      ]
+    },
+    "writing-plans": {
+      "expected_verdict": "truncate",
+      "why": "Structure, right-sizing and self-review are the skill. The rationale essay, the rejected-alternatives log, and the appendix \u2014 which re-renders the structure section as a filled-in example \u2014 are duplicated or inert.",
+      "source": "github.com/obra/superpowers/blob/main/skills/writing-plans (real name, verbatim description, real section titles)",
+      "sections": [
+        "When to Use",
+        "Scope Check",
+        "Plan Structure",
+        "Task Right-Sizing",
+        "No Placeholders",
+        "Self-Review Before Handing Off",
+        "Rationale: Why Written Plans Beat Working It Out As You Go",
+        "Alternative Formats Considered and Rejected",
+        "Appendix: Worked Example"
+      ],
+      "bytes": 5712,
+      "lines": 144,
+      "tokens_est": 1428,
+      "low_value_sections": [
+        "Rationale: Why Written Plans Beat Working It Out As You Go",
+        "Alternative Formats Considered and Rejected",
+        "Appendix: Worked Example"
+      ]
+    },
+    "slack-gif-creator": {
+      "expected_verdict": "remove",
+      "why": "Nothing in a Python analyzer repo will ever trigger this. Pure context tax.",
+      "source": "github.com/anthropics/skills/tree/main/skills/slack-gif-creator (real name + description from the repo frontmatter)",
+      "sections": [
+        "Slack's Constraints",
+        "Workflow",
+        "Animation Concepts",
+        "Palette",
+        "Validation"
+      ],
+      "bytes": 1904,
+      "lines": 48,
+      "tokens_est": 476
+    },
+    "algorithmic-art": {
+      "expected_verdict": "remove",
+      "why": "Creative-coding skill with no overlap with the workspace; never invoked.",
+      "source": "github.com/anthropics/skills/tree/main/skills/algorithmic-art (real name + verbatim description)",
+      "sections": [
+        "Setup",
+        "Parameter Exploration",
+        "Flow Fields",
+        "Particle Systems",
+        "Color",
+        "Composition",
+        "Originality",
+        "Export"
+      ],
+      "bytes": 2691,
+      "lines": 72,
+      "tokens_est": 672
+    },
+    "brand-guidelines": {
+      "expected_verdict": "remove",
+      "why": "Design-system skill. No artifact in this workspace is user-facing; never invoked.",
+      "source": "github.com/anthropics/skills/tree/main/skills/brand-guidelines (real name, description lightly de-Anthropic-ised)",
+      "sections": [
+        "When to Apply",
+        "Color",
+        "Typography",
+        "Layout",
+        "Logo Use",
+        "Checking Your Work"
+      ],
+      "bytes": 1606,
+      "lines": 44,
+      "tokens_est": 401
+    },
+    "ios-app-release": {
+      "expected_verdict": "remove",
+      "why": "Mobile-platform skill in a Python/git repo with no Xcode project. Never invoked.",
+      "source": "NO REAL SOURCE FOUND - written from domain knowledge as the mobile-specific 'remove' case",
+      "sections": [
+        "Pre-flight",
+        "Archive",
+        "Signing",
+        "Export and Upload",
+        "TestFlight",
+        "Symbolication",
+        "App Review",
+        "Phased Release and Rollback"
+      ],
+      "bytes": 3107,
+      "lines": 82,
+      "tokens_est": 776
+    }
+  }
+}

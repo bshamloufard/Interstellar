@@ -1,0 +1,159 @@
+{
+  "generated": "2026-08-08",
+  "note": "Staging catalog for synthetic agent-trace corpus. Verification column reflects package-existence probes run 2026-08-08 (npm view / PyPI JSON API / unauthenticated MCP initialize POST). No servers were actually launched, so est_tool_count comes from upstream docs, not a live tools/list.",
+  "config_target": "~/.grok/config.toml under [mcp_servers.<name>], or a project-scoped .grok/config.toml",
+  "servers": [
+    {
+      "name": "filesystem",
+      "transport": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-filesystem /Users/sentorcc/Interstellar",
+      "package": "@modelcontextprotocol/server-filesystem",
+      "registry": "npm",
+      "verified_version": "2026.7.10",
+      "needs_auth": false,
+      "expected_to_connect": true,
+      "est_tool_count": 14,
+      "tool_count_source": "upstream README",
+      "purpose": "Sandboxed read/write file operations restricted to allow-listed directories.",
+      "source_url": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"
+    },
+    {
+      "name": "memory",
+      "transport": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-memory",
+      "package": "@modelcontextprotocol/server-memory",
+      "registry": "npm",
+      "verified_version": "2026.7.4",
+      "needs_auth": false,
+      "expected_to_connect": true,
+      "est_tool_count": 9,
+      "tool_count_source": "upstream README",
+      "purpose": "Knowledge-graph persistent memory backed by a JSONL file (entities, relations, observations).",
+      "env": { "MEMORY_FILE_PATH": "/Users/sentorcc/Interstellar/synth/memory.jsonl" },
+      "source_url": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory"
+    },
+    {
+      "name": "sequential-thinking",
+      "transport": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-sequential-thinking",
+      "package": "@modelcontextprotocol/server-sequential-thinking",
+      "registry": "npm",
+      "verified_version": "2026.7.4",
+      "needs_auth": false,
+      "expected_to_connect": true,
+      "est_tool_count": 1,
+      "tool_count_source": "upstream README",
+      "purpose": "Structured step-by-step reasoning scratchpad; one tool called repeatedly within a task.",
+      "source_url": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking"
+    },
+    {
+      "name": "everything",
+      "transport": "stdio",
+      "command": "npx -y @modelcontextprotocol/server-everything",
+      "package": "@modelcontextprotocol/server-everything",
+      "registry": "npm",
+      "verified_version": "2026.7.4",
+      "needs_auth": false,
+      "expected_to_connect": true,
+      "est_tool_count": 19,
+      "tool_count_source": "upstream docs/features.md",
+      "purpose": "Official reference/test server. Deliberately exercises long-running operations, server-initiated sampling, elicitation, image results, resource links, and log spam. Highest-value server for trace variety.",
+      "extras": { "prompts": 4, "resource_families": 4 },
+      "source_url": "https://github.com/modelcontextprotocol/servers/tree/main/src/everything"
+    },
+    {
+      "name": "git",
+      "transport": "stdio",
+      "command": "uvx mcp-server-git --repository /Users/sentorcc/Interstellar",
+      "package": "mcp-server-git",
+      "registry": "pypi",
+      "verified_version": "2026.7.10",
+      "needs_auth": false,
+      "expected_to_connect": true,
+      "est_tool_count": 12,
+      "tool_count_source": "upstream README",
+      "purpose": "Read, search, and manipulate a local git repository (status, diff, log, commit, branch, checkout).",
+      "warning": "PyPI-only. The npm package literally named 'mcp-server-git' (v0.0.2) is a different, unofficial package - do not launch this via npx.",
+      "source_url": "https://github.com/modelcontextprotocol/servers/tree/main/src/git"
+    },
+    {
+      "name": "fetch",
+      "transport": "stdio",
+      "command": "uvx mcp-server-fetch",
+      "package": "mcp-server-fetch",
+      "registry": "pypi",
+      "verified_version": "2026.7.10",
+      "needs_auth": false,
+      "expected_to_connect": true,
+      "est_tool_count": 1,
+      "tool_count_source": "upstream README",
+      "purpose": "Fetch a URL and extract its contents as markdown. Respects robots.txt unless --ignore-robots-txt is passed.",
+      "warning": "PyPI-only. The npm package literally named 'mcp-server-fetch' (v0.0.2) is a different, unofficial package - do not launch this via npx.",
+      "source_url": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch"
+    },
+    {
+      "name": "time",
+      "transport": "stdio",
+      "command": "uvx mcp-server-time --local-timezone=America/Los_Angeles",
+      "package": "mcp-server-time",
+      "registry": "pypi",
+      "verified_version": "2026.7.10",
+      "needs_auth": false,
+      "expected_to_connect": true,
+      "est_tool_count": 2,
+      "tool_count_source": "upstream README",
+      "purpose": "Current time and timezone conversion. Cheapest server in the set; useful as a baseline MCP startup cost.",
+      "source_url": "https://github.com/modelcontextprotocol/servers/tree/main/src/time"
+    },
+    {
+      "name": "context7",
+      "transport": "http",
+      "command": null,
+      "url": "https://mcp.context7.com/mcp",
+      "package": null,
+      "registry": null,
+      "verified_version": null,
+      "needs_auth": false,
+      "auth_note": "Works keyless at a reduced rate limit; an API key (Authorization: Bearer) only raises the limit. Unauthenticated initialize POST returned HTTP 200 on 2026-08-08.",
+      "expected_to_connect": true,
+      "est_tool_count": 2,
+      "tool_count_source": "vendor docs (resolve-library-id, get-library-docs)",
+      "purpose": "Live up-to-date library/framework documentation lookup. The only remote server here that actually connects, so it supplies the real network-transport latency in the corpus.",
+      "source_url": "https://github.com/upstash/context7"
+    },
+    {
+      "name": "github",
+      "transport": "http",
+      "command": null,
+      "url": "https://api.githubcopilot.com/mcp/",
+      "package": null,
+      "registry": null,
+      "verified_version": null,
+      "needs_auth": true,
+      "auth_note": "Requires OAuth or a GitHub PAT. Unauthenticated initialize POST returned HTTP 401 on 2026-08-08.",
+      "expected_to_connect": false,
+      "intentional_failure": true,
+      "est_tool_count": 35,
+      "tool_count_source": "rough estimate from vendor tool docs; NOT verified against a live tools/list",
+      "purpose": "INTENTIONALLY UNAUTHENTICATED. Included so the corpus contains a realistic MCP auth-failure startup path (HTTP 401). Set enabled = false to remove it.",
+      "source_url": "https://github.com/github/github-mcp-server"
+    }
+  ],
+  "rejected": [
+    {
+      "name": "sqlite",
+      "reason": "Archived from the reference repo; @modelcontextprotocol/server-sqlite does not exist on npm. PyPI mcp-server-sqlite still resolves but is unmaintained in servers-archived.",
+      "source_url": "https://github.com/modelcontextprotocol/servers-archived"
+    },
+    {
+      "name": "playwright",
+      "reason": "Very popular (@playwright/mcp v0.0.79, ~22 tools, no auth) but launches a real browser - heavy startup and non-representative latency for this corpus. Add deliberately if browser traces are wanted.",
+      "source_url": "https://github.com/microsoft/playwright-mcp"
+    },
+    {
+      "name": "slack / gdrive / postgres / puppeteer",
+      "reason": "Archived from the reference repo and/or require paid or org credentials.",
+      "source_url": "https://github.com/modelcontextprotocol/servers-archived"
+    }
+  ]
+}

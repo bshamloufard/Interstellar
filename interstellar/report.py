@@ -358,11 +358,24 @@ def _diff_html(diff_text):
     return '<pre class="diff-wrap"><code>' + "\n".join(lines) + "</code></pre>"
 
 
+CACHE_SENSITIVE_TITLE = (
+    "This figure swings with prompt-cache warmth (run history and timing), "
+    "not only with this patch — read it as indicative, not as a precise "
+    "measurement of what the patch did."
+)
+
+
 def _metric_row(name, lower_is_better, m, highlight=False):
     if not m:
         return ""
     label = METRIC_LABELS.get(name, name)
     tag = ' <span class="tag">target</span>' if highlight else ""
+    # Absent on older reports (statistics predating the cache_sensitive
+    # flag) -- default to not-flagged rather than crash or over-warn.
+    cache_tag = (
+        f' <span class="tag cache-tag" title="{_esc(CACHE_SENSITIVE_TITLE)}">cache&#8224;</span>'
+        if m.get("cache_sensitive") else ""
+    )
     hl = "hl" if highlight else ""
 
     # No run supplied a pair for this metric at all (n=0, both medians
@@ -374,7 +387,7 @@ def _metric_row(name, lower_is_better, m, highlight=False):
         row_cls = f"no-data {hl}".strip()
         return (
             f'<tr class="{row_cls}">'
-            f"<td>{_esc(label)}{tag}</td>"
+            f"<td>{_esc(label)}{tag}{cache_tag}</td>"
             f'<td colspan="4" class="no-data-cell">no paired data — no run reported both '
             f"a control and a treatment value for this metric</td>"
             f"</tr>"
@@ -404,7 +417,7 @@ def _metric_row(name, lower_is_better, m, highlight=False):
     row_cls = f"{cls} {hl}".strip()
     return (
         f'<tr class="{row_cls}">'
-        f"<td>{_esc(label)}{tag}</td>"
+        f"<td>{_esc(label)}{tag}{cache_tag}</td>"
         f"<td>{_fmt_num(m.get('control_median'))}</td>"
         f"<td>{_fmt_num(m.get('treatment_median'))}</td>"
         f"<td>{_fmt_delta(delta_abs)}{_esc(direction)}</td>"
@@ -422,12 +435,24 @@ def _metrics_table(efficiency, metric_target):
     )
     if not rows:
         return '<p class="muted">No efficiency statistics available.</p>'
+    # Only shown when at least one row actually carries the flag (absent on
+    # reports predating it, or when the CLI genuinely found nothing
+    # cache-sensitive in this patch's metric set) -- the marker's tooltip
+    # explains it too, but a hover-only explanation is not legible on a
+    # static, printable page, so it's spelled out here as well.
+    any_cache_sensitive = any(
+        (efficiency.get(name) or {}).get("cache_sensitive") for name, _ in EFFICIENCY_METRICS
+    )
+    legend = (
+        f'<p class="cache-legend muted">cache&#8224; {_esc(CACHE_SENSITIVE_TITLE)}</p>'
+        if any_cache_sensitive else ""
+    )
     return (
         '<div class="table-wrap"><table class="metrics">'
         "<thead><tr><th>Metric</th><th>Control (median)</th>"
         "<th>Treatment (median)</th><th>&Delta;</th><th>&Delta;%</th>"
         "<th>95% CI on &Delta;</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table></div>"
+        f"<tbody>{rows}</tbody></table></div>{legend}"
     )
 
 

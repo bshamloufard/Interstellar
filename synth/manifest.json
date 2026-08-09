@@ -1,0 +1,351 @@
+{
+  "generated_by": "run_corpus.py",
+  "grok_version": "grok 1.0.0 (a959d1a) [stable]",
+  "workspace": "/Users/sentorcc/Interstellar/synth/workspace",
+  "total_cost_usd": 0.7795,
+  "sessions": [
+    {
+      "scenario": "skill_bloat",
+      "expects": {
+        "skill": "strict-audit",
+        "verdict": "truncate",
+        "note": "loads 5.8KB but only the 6-line Procedure section drives behaviour"
+      },
+      "prompt": "Read the strict-audit skill at ~/.grok/skills/strict-audit/SKILL.md and apply its procedure to app.py.",
+      "wall_s": 25.6,
+      "session_id": "019fe41b-a681-7d91-a30b-80e097b8ffb1",
+      "turns": 3,
+      "cost_usd": 0.0570984,
+      "usage": {
+        "input_tokens": 19008,
+        "cache_read_input_tokens": 34048,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 1478,
+        "reasoning_tokens": 174,
+        "total_tokens": 54534
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41b-a681-7d91-a30b-80e097b8ffb1"
+    },
+    {
+      "scenario": "skill_lean",
+      "expects": {
+        "skill": "py-import-hygiene",
+        "verdict": "keep",
+        "note": "small body, every line actionable"
+      },
+      "prompt": "Read the py-import-hygiene skill at ~/.grok/skills/py-import-hygiene/SKILL.md and apply it to utils.py.",
+      "wall_s": 20.6,
+      "session_id": "019fe41c-0a49-77a0-be0e-656a469e6308",
+      "turns": 5,
+      "cost_usd": 0.0621748,
+      "usage": {
+        "input_tokens": 18128,
+        "cache_read_input_tokens": 68096,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 915,
+        "reasoning_tokens": 729,
+        "total_tokens": 87139
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41c-0a49-77a0-be0e-656a469e6308"
+    },
+    {
+      "scenario": "skill_underspecified",
+      "expects": {
+        "skill": "changelog-entry",
+        "verdict": "add_lines",
+        "note": "skill never names the target file, so the agent burns exploratory tool calls finding one"
+      },
+      "prompt": "Read the changelog-entry skill at ~/.grok/skills/changelog-entry/SKILL.md and follow it for the change 'added config parser'.",
+      "wall_s": 13.8,
+      "session_id": "019fe41c-5a72-7a62-90bb-b57466b108b9",
+      "turns": 4,
+      "cost_usd": 0.0517756,
+      "usage": {
+        "input_tokens": 16910,
+        "cache_read_input_tokens": 49792,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 503,
+        "reasoning_tokens": 433,
+        "total_tokens": 67205
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41c-5a72-7a62-90bb-b57466b108b9"
+    },
+    {
+      "scenario": "tool_thrash",
+      "expects": {
+        "verdict": "redundant_calls",
+        "note": "same file read twice, same compile run twice, identical args"
+      },
+      "prompt": "Check whether app.py has a syntax error. Read it, then run python3 -m py_compile on it, then read it again to double check, then compile it again to be sure.",
+      "wall_s": 15.8,
+      "session_id": "019fe41c-9077-7981-b1a7-ee9ffcb60ea0",
+      "turns": 6,
+      "cost_usd": 0.063402,
+      "usage": {
+        "input_tokens": 17274,
+        "cache_read_input_tokens": 83840,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 617,
+        "reasoning_tokens": 205,
+        "total_tokens": 101731
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41c-9077-7981-b1a7-ee9ffcb60ea0"
+    },
+    {
+      "scenario": "subagent_spawn",
+      "expects": {
+        "verdict": "subagent_overhead",
+        "note": "delegates a task small enough to do inline"
+      },
+      "prompt": "Use a subagent to summarize what utils.py does, then report its answer.",
+      "wall_s": 23.6,
+      "session_id": "019fe41c-ce18-7631-ab16-7377a6d161d9",
+      "turns": 4,
+      "cost_usd": 0.0739036,
+      "usage": {
+        "input_tokens": 24647,
+        "cache_read_input_tokens": 63232,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 940,
+        "reasoning_tokens": 435,
+        "total_tokens": 88819
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41c-ce18-7631-ab16-7377a6d161d9"
+    },
+    {
+      "scenario": "mcp_slow",
+      "expects": {
+        "verdict": "mcp_latency",
+        "note": "runpod is an npx stdio server; connect + call are slow"
+      },
+      "prompt": "Use the runpod MCP tools to list the available GPU types. Then tell me how many there were.",
+      "wall_s": 13.5,
+      "session_id": "019fe41d-2a8f-7aa2-8c68-ddb4d62d980f",
+      "turns": 3,
+      "cost_usd": 0.0711352,
+      "usage": {
+        "input_tokens": 28694,
+        "cache_read_input_tokens": 39424,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 320,
+        "reasoning_tokens": 141,
+        "total_tokens": 68438
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41d-2a8f-7aa2-8c68-ddb4d62d980f"
+    },
+    {
+      "scenario": "real_skill_bloat",
+      "expects": {
+        "skill": "code-review",
+        "verdict": "truncate",
+        "note": "211-line real skill; history/philosophy sections never drive behaviour"
+      },
+      "prompt": "Read the code-review skill at ~/.grok/skills/code-review/SKILL.md and apply it to app.py.",
+      "wall_s": 50.3,
+      "session_id": "019fe41d-5f31-7bc2-a948-9718f60269aa",
+      "turns": 3,
+      "cost_usd": 0.0664768,
+      "usage": {
+        "input_tokens": 19460,
+        "cache_read_input_tokens": 35456,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 2820,
+        "reasoning_tokens": 906,
+        "total_tokens": 57736
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41d-5f31-7bc2-a948-9718f60269aa"
+    },
+    {
+      "scenario": "real_skill_lean",
+      "expects": {
+        "skill": "verification-before-completion",
+        "verdict": "keep",
+        "note": "37-line real skill, all actionable"
+      },
+      "prompt": "Read the verification-before-completion skill at ~/.grok/skills/verification-before-completion/SKILL.md and apply it to verify utils.py is correct.",
+      "wall_s": 25.1,
+      "session_id": "019fe41e-23c1-7b90-be76-d83d051beeab",
+      "turns": 4,
+      "cost_usd": 0.060112,
+      "usage": {
+        "input_tokens": 18482,
+        "cache_read_input_tokens": 51200,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 1298,
+        "reasoning_tokens": 405,
+        "total_tokens": 70980
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41e-23c1-7b90-be76-d83d051beeab"
+    },
+    {
+      "scenario": "real_skill_debug",
+      "expects": {
+        "skill": "systematic-debugging",
+        "verdict": "truncate",
+        "note": "152-line real skill with long rationalization prose"
+      },
+      "prompt": "Read the systematic-debugging skill at ~/.grok/skills/systematic-debugging/SKILL.md and use it to find why parse_config crashes on a line with no equals sign.",
+      "wall_s": 21.9,
+      "session_id": "019fe41e-860d-7660-a3db-aec09c2996e6",
+      "turns": 5,
+      "cost_usd": 0.0659332,
+      "usage": {
+        "input_tokens": 19040,
+        "cache_read_input_tokens": 71424,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 1071,
+        "reasoning_tokens": 439,
+        "total_tokens": 91535
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41e-860d-7660-a3db-aec09c2996e6"
+    },
+    {
+      "scenario": "mcp_filesystem",
+      "expects": {
+        "verdict": "mcp_latency",
+        "note": "npx stdio server; multi-second connect for a task native tools already cover"
+      },
+      "prompt": "Use the filesystem MCP server to list the directory /Users/sentorcc/Interstellar/synth/workspace and read utils.py through it. Report what you found.",
+      "wall_s": 11.1,
+      "session_id": "019fe41e-db4b-7da1-99ce-772cb10dea4e",
+      "turns": 3,
+      "cost_usd": 0.0520164,
+      "usage": {
+        "input_tokens": 19608,
+        "cache_read_input_tokens": 35968,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 335,
+        "reasoning_tokens": 168,
+        "total_tokens": 55911
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41e-db4b-7da1-99ce-772cb10dea4e"
+    },
+    {
+      "scenario": "mcp_unused_fleet",
+      "expects": {
+        "verdict": "mcp_remove",
+        "note": "trivial task pays full MCP startup for 96 tools, calls none of them"
+      },
+      "prompt": "What is 17 * 23? Answer with just the number.",
+      "wall_s": 4.6,
+      "session_id": "019fe41f-0675-7160-a8c4-cef32335f91f",
+      "turns": 1,
+      "cost_usd": 0.0054132,
+      "usage": {
+        "input_tokens": 60,
+        "cache_read_input_tokens": 16384,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 63,
+        "reasoning_tokens": 58,
+        "total_tokens": 16507
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41f-0675-7160-a8c4-cef32335f91f"
+    },
+    {
+      "scenario": "skill_slash_invoke",
+      "expects": {
+        "skill": "strict-audit",
+        "verdict": "truncate",
+        "note": "slash activation; cost comes from skill_bytes on the native event, not a tool_result join"
+      },
+      "prompt": "/strict-audit app.py",
+      "wall_s": 19.5,
+      "session_id": "019fe41f-1872-7501-afc1-55cf3b875a5a",
+      "turns": 3,
+      "cost_usd": 0.0523592,
+      "usage": {
+        "input_tokens": 18112,
+        "cache_read_input_tokens": 35584,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 910,
+        "reasoning_tokens": 383,
+        "total_tokens": 54606
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41f-1872-7501-afc1-55cf3b875a5a"
+    },
+    {
+      "scenario": "baseline_clean",
+      "expects": {
+        "verdict": "clean",
+        "note": "minimal well-scoped session; control group"
+      },
+      "prompt": "In one sentence, what does slugify in utils.py do?",
+      "wall_s": 8.0,
+      "session_id": "019fe41f-647f-7753-9d57-e551b1e07f59",
+      "turns": 3,
+      "cost_usd": 0.0442156,
+      "usage": {
+        "input_tokens": 16640,
+        "cache_read_input_tokens": 33152,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 165,
+        "reasoning_tokens": 130,
+        "total_tokens": 49957
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41f-647f-7753-9d57-e551b1e07f59"
+    },
+    {
+      "scenario": "big_output",
+      "expects": {
+        "verdict": "truncate_tool_output",
+        "note": "large terminal result pulled wholesale into context"
+      },
+      "prompt": "Run 'cat /Users/sentorcc/Interstellar/Cargo.toml' and then name the three workspace members whose paths sort last alphabetically. You must read the actual file contents, do not use grep, sort, tail or any other filter to narrow it down first.",
+      "wall_s": 12.9,
+      "session_id": "019fe41f-839b-7f01-b6c4-2df3e9e565d1",
+      "turns": 2,
+      "cost_usd": 0.0534856,
+      "usage": {
+        "input_tokens": 22379,
+        "cache_read_input_tokens": 16512,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 629,
+        "reasoning_tokens": 541,
+        "total_tokens": 39520
+      },
+      "stop_reason": "end_turn",
+      "ok": true,
+      "repeat": 0,
+      "session_dir": "/Users/sentorcc/.grok/sessions/%2FUsers%2Fsentorcc%2FInterstellar%2Fsynth%2Fworkspace/019fe41f-839b-7f01-b6c4-2df3e9e565d1"
+    }
+  ]
+}
