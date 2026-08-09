@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Session Trace</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand-mark">◈</span>
+      <div class="trace-title">
+        <div class="trace-label">Trace</div>
+        <h1 id="title">Loading…</h1>
+      </div>
+    </div>
+    <div class="topbar-right" id="header-meta"></div>
+  </header>
+
+  <div class="workspace" id="workspace">
+    <!-- LEFT: turns + timeline -->
+    <section class="trace-pane" id="trace-pane">
+      <div class="trace-toolbar">
+        <div class="toolbar-left">
+          <button type="button" class="tb-btn" id="btn-expand-all" title="Expand all">Expand</button>
+          <button type="button" class="tb-btn" id="btn-collapse-all" title="Collapse all">Collapse</button>
+          <button type="button" class="tb-btn" id="btn-zoom-out" title="Zoom out (or Ctrl/⌘ + scroll)">−</button>
+          <button type="button" class="tb-btn" id="btn-zoom-in" title="Zoom in (or Ctrl/⌘ + scroll)">+</button>
+          <button type="button" class="tb-btn" id="btn-zoom-fit" title="Fit full session in view (double-click time axis)">Fit</button>
+          <span class="zoom-label" id="zoom-label" title="Ctrl/⌘+scroll or scroll on time axis to zoom">fit</span>
+        </div>
+        <div class="toolbar-right">
+          <span class="zoom-hint muted">⌘/Ctrl+scroll zoom · scroll axis zoom</span>
+          <label class="toggle">
+            <input type="checkbox" id="toggle-bars" checked />
+            <span>Timeline</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="trace-scroll" id="trace-scroll">
+        <div class="time-header" id="time-header">
+          <div class="time-header-gutter" title="Turns / nodes">
+            <span>Node</span>
+          </div>
+          <!-- drag: turns column ↔ timeline -->
+          <div
+            class="resizer resizer-gutter"
+            id="resize-gutter"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize turns column"
+            title="Drag to resize turns column"
+          ></div>
+          <div class="time-header-axis" id="time-axis"></div>
+        </div>
+        <div id="tree" class="tree"></div>
+      </div>
+    </section>
+
+    <!-- drag: timeline pane ↔ details -->
+    <div
+      class="resizer resizer-main"
+      id="resize-main"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize details panel"
+      title="Drag to resize details panel"
+    ></div>
+
+    <!-- RIGHT: details -->
+    <aside class="detail-pane" id="detail-pane">
+      <div class="detail-head" id="detail-head">
+        <div class="detail-when muted" id="detail-when">Select a span</div>
+        <div class="detail-badges" id="detail-badges"></div>
+      </div>
+      <div class="detail-tabs">
+        <button type="button" class="tab on" data-tab="preview">Preview</button>
+        <button type="button" class="tab" data-tab="metadata">Metadata</button>
+      </div>
+      <div class="detail-body">
+        <div id="tab-preview" class="tab-panel on">
+          <p class="muted pad">Click a row in the trace tree.</p>
+        </div>
+        <div id="tab-metadata" class="tab-panel">
+          <pre class="meta-json muted pad">—</pre>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

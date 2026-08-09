@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Normalize (if needed) then serve the HTML visualizer.
+# Usage:
+#   interstellar-visualize [session-id]
+#   interstellar-visualize              # current / latest session
+#
+# Always runs the normalizer first for a session-id (fresh package),
+# unless you pass an existing package directory with manifest.json.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=interstellar-lib.sh
+source "$HERE/interstellar-lib.sh"
+
+usage() {
+  cat <<EOF
+usage: interstellar-visualize [session-id|package_dir] [--port N] [--no-open]
+
+  Opens the session_analysis visualizer. If you pass a session-id (or nothing),
+  the session is normalized first, then served.
+
+  session-id    Session UUID (default: current workspace / newest)
+  package_dir   Existing package (manifest.json) — serve only, no re-normalize
+  --port N      Port (default 8765)
+  --no-open     Do not open a browser
+EOF
+}
+
+ARG=""
+PORT=8765
+NO_OPEN=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --port)
+      PORT="${2:-8765}"
+      shift 2
+      ;;
+    --no-open) NO_OPEN=1; shift ;;
+    -*)
+      echo "error: unknown flag: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ -z "$ARG" ]]; then
+        ARG="$1"
+        shift
+      else
+        echo "error: unexpected argument: $1" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+PKG=""
+SID=""
+
+if [[ -n "$ARG" ]] && _interstellar_is_package "$ARG"; then
+  # Explicit package path — serve as-is
+  PKG="$(cd "$ARG" && pwd)"
+  SID="$(basename "$PKG")"
+  echo "package:    $PKG  (skip normalize — already a package)"
+else
+  # Session id / default current → always normalize first
+  SESSION="$(_interstellar_resolve_session "${ARG:-}")" || exit 1
+  SID="$(_interstellar_session_id "$SESSION")"
+  PKG="$(_interstellar_default_package_out "$SESSION")"
+  echo "session-id: $SID"
+  _interstellar_normalize_to "$SESSION" "$PKG" >/dev/null
+  echo ""
+  echo "✓ package:  $PKG"
+fi
+
+echo "url:        http://127.0.0.1:${PORT}/"
+echo "(Ctrl+C to stop)"
+echo ""
+
+ARGS=(serve "$PKG" --port "$PORT")
+if [[ "$NO_OPEN" -eq 1 ]]; then
+  ARGS+=(--no-open)
+fi
+exec env PYTHONPATH="$INTERSTELLAR_SA_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  "$(_interstellar_python)" -m sa "${ARGS[@]}"

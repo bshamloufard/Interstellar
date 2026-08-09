@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Normalize a Grok session → session_analysis package.
+# Usage:
+#   interstellar-normalize [session-id]
+#   interstellar-normalize              # current workspace session, else newest
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=interstellar-lib.sh
+source "$HERE/interstellar-lib.sh"
+
+usage() {
+  cat <<EOF
+usage: interstellar-normalize [session-id] [-o package_dir]
+
+  session-id   Session UUID (directory basename under \$GROK_HOME/sessions).
+               Also accepts a full session directory path.
+               Default: current workspace session, else newest session,
+               else \$GROK_SESSION_ID if set.
+
+  -o DIR       Output package directory
+               Default: \$INTERSTELLAR_PACKAGES_DIR/<session-id>
+
+  GROK_HOME=${GROK_HOME}
+EOF
+}
+
+SESSION_ARG=""
+OUT_ARG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -o|--out)
+      OUT_ARG="${2:-}"
+      shift 2
+      ;;
+    -*)
+      echo "error: unknown flag: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ -z "$SESSION_ARG" ]]; then
+        SESSION_ARG="$1"
+        shift
+      else
+        echo "error: unexpected argument: $1" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+SESSION="$(_interstellar_resolve_session "${SESSION_ARG:-}")" || exit 1
+SID="$(_interstellar_session_id "$SESSION")"
+OUT="${OUT_ARG:-$(_interstellar_default_package_out "$SESSION")}"
+
+echo "session-id: $SID"
+_interstellar_normalize_to "$SESSION" "$OUT" >/dev/null
+
+echo ""
+echo "✓ package:"
+echo "    $OUT"
+echo ""
+echo "visualize:"
+echo "  interstellar-visualize $SID"
+echo "  interstellar $SID"

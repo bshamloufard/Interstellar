@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# All-in-one: normalize session + open visualizer.
+#
+#   interstellar                 # current workspace session (else newest)
+#   interstellar <session-id>    # find by id under $GROK_HOME/sessions
+#   interstellar normalize ...
+#   interstellar visualize ...
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=interstellar-lib.sh
+source "$HERE/interstellar-lib.sh"
+
+usage() {
+  cat <<EOF
+interstellar — session analysis for Grok Build (Interstellar / grok-hack)
+
+USAGE
+  interstellar [session-id] [options]     Normalize + open visualizer
+  interstellar normalize [session-id] [-o DIR]
+  interstellar visualize [session-id] [--port N]
+  interstellar help
+
+  session-id   UUID / folder name under \$GROK_HOME/sessions
+               Default: current workspace session, else newest,
+               else \$GROK_SESSION_ID
+
+OPTIONS
+  -o, --out DIR       Package output (default: packages/<session-id>)
+  --port N            Visualizer port (default 8765)
+  --no-open           Do not open a browser
+  --normalize-only    Only write the package
+
+EXAMPLES
+  interstellar
+  interstellar 019fe3d9-f0be-7650-bc85-2c24366ffb86
+  interstellar-normalize
+  interstellar-visualize 019fe3d9-f0be-7650-bc85-2c24366ffb86
+
+In grok-hack: /interstellar   or   /interstellar <session-id>
+
+GROK_HOME=${GROK_HOME}
+EOF
+}
+
+if [[ "${1:-}" == "normalize" ]]; then
+  shift
+  exec "$HERE/interstellar-normalize" "$@"
+fi
+if [[ "${1:-}" == "visualize" || "${1:-}" == "viz" || "${1:-}" == "serve" ]]; then
+  shift
+  exec "$HERE/interstellar-visualize" "$@"
+fi
+if [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+SESSION_ARG=""
+OUT_ARG=""
+PORT=8765
+NO_OPEN=0
+NORMALIZE_ONLY=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--out)
+      OUT_ARG="${2:-}"
+      shift 2
+      ;;
+    --port)
+      PORT="${2:-8765}"
+      shift 2
+      ;;
+    --no-open) NO_OPEN=1; shift ;;
+    --normalize-only) NORMALIZE_ONLY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*)
+      echo "error: unknown flag: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ -z "$SESSION_ARG" ]]; then
+        SESSION_ARG="$1"
+        shift
+      else
+        echo "error: unexpected argument: $1" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+SESSION="$(_interstellar_resolve_session "${SESSION_ARG:-}")" || exit 1
+SID="$(_interstellar_session_id "$SESSION")"
+OUT="${OUT_ARG:-$(_interstellar_default_package_out "$SESSION")}"
+
+echo "════════════════════════════════════════════════════"
+echo " interstellar — normalize + visualize"
+echo "════════════════════════════════════════════════════"
+echo " session-id  $SID"
+echo " session     $SESSION"
+echo " package     $OUT"
+echo "════════════════════════════════════════════════════"
+echo ""
+
+_interstellar_normalize_to "$SESSION" "$OUT" >/dev/null
+
+echo ""
+echo "✓ package written to:"
+echo "    $OUT"
+echo ""
+
+if [[ "$NORMALIZE_ONLY" -eq 1 ]]; then
+  echo "normalize-only: skip visualizer"
+  echo "  interstellar-visualize $SID"
+  exit 0
+fi
+
+echo "starting visualizer → http://127.0.0.1:${PORT}/"
+echo "(Ctrl+C to stop)"
+echo ""
+
+ARGS=(serve "$OUT" --port "$PORT")
+if [[ "$NO_OPEN" -eq 1 ]]; then
+  ARGS+=(--no-open)
+fi
+exec env PYTHONPATH="$INTERSTELLAR_SA_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  "$(_interstellar_python)" -m sa "${ARGS[@]}"
