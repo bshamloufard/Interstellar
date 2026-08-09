@@ -1,17 +1,30 @@
 """Measure and judge: turn a `ReplayMatrix` into per-run `Grade` records.
 
-Three jobs, kept apart on purpose:
+Four jobs, kept apart on purpose:
 
-  efficiency()   - deterministic. Reads the ten EFFICIENCY_METRICS straight off
-                   a RunResult (types.make_run_result): total_tokens/cost_usd/
-                   turns from grok's own accounting on the run, everything
-                   else from the run's normalized trace. Never recomputes or
-                   estimates -- a value nothing measured comes back as None.
-  regressions()  - deterministic. Diffs two traces for detector signals that
-                   are present in treatment but not control.
-  judge_pair()   - the only model call. Position-swapped pairwise preference
-                   over the two response texts, so an order-dependent verdict
-                   collapses to a tie instead of being reported as evidence.
+  efficiency()        - deterministic. Reads the ten EFFICIENCY_METRICS
+                         straight off a RunResult (types.make_run_result):
+                         total_tokens/cost_usd/turns from grok's own
+                         accounting on the run, everything else from the
+                         run's normalized trace. Never recomputes or
+                         estimates -- a value nothing measured comes back as
+                         None.
+  regressions()        - deterministic. Diffs two traces for detector signals
+                         that are present in treatment but not control.
+  judge_pair()         - the only model call. Position-swapped pairwise
+                         preference over the two response texts, so an
+                         order-dependent verdict collapses to a tie instead
+                         of being reported as evidence.
+  judge_consistency()  - deterministic. Aggregates the per-pair `consistent`
+                         flag judge_pair() already computes into a single
+                         published number, because a win rate is a much
+                         weaker claim from a self-inconsistent judge than
+                         from a reliable one and a reader can't tell the
+                         difference unless we print it (published pairwise-
+                         LLM-judge baselines run ~70-77% consistency with
+                         25-50% flip rates -- Zheng et al. 2023,
+                         arXiv:2306.05685, the MT-Bench swap-and-tie
+                         protocol this module's position swap follows).
 
     python3 -m unittest discover interstellar/tests
 """
@@ -178,32 +191,47 @@ _JUDGE_SCHEMA = {
 }
 
 _JUDGE_RUBRIC = """\
-You are grading two candidate agent runs against the same user prompt. Pick
-the better one, or "tie" if neither is clearly better.
+You are comparing two candidate agent runs against the same user prompt. Do
+not form a holistic first impression of "which one is better" -- work through
+the concrete questions below, in order, for BOTH responses, and let the
+answers determine the verdict. Stop at the first question where the two
+responses differ and decide there; only fall through to a lower-priority
+question when the two responses tie on every question above it.
 
-Rubric, in priority order:
-1. Correctness with respect to the user's request.
-2. Constraint adherence (the user's explicit requirements were followed).
-3. Tool-use quality: the right tool was used, with valid arguments, and its
-   result was actually used rather than ignored or re-derived.
-4. Completeness: the request was fully addressed, not partially.
-5. Efficiency (fewer tokens, calls, turns) breaks ties ONLY when correctness,
-   constraints, tool-use, and completeness are equal between the two.
+1. Correctness -- did it actually answer the question the user asked? A
+   response that answers a different, easier, or broader question than the
+   one asked is not correct just because it is competent.
+2. Constraint adherence -- did it obey every explicit requirement or
+   limitation the user stated (format, scope, things to avoid, things to
+   include)? Note each constraint and whether each response met it.
+3. Tool-use quality -- for each tool call visible in the response: was it the
+   right tool for that step, were its arguments valid, and was its result
+   actually used in what came next (not ignored, not silently re-derived by
+   the model instead of reading the result it already has)?
+4. Completeness -- is anything the request asked for missing from either
+   response? Partial credit is not a tie; a response missing a requested part
+   loses to one that has it, all else equal.
+5. Efficiency (fewer tokens, tool calls, turns) breaks the tie ONLY when
+   questions 1-4 come out identical between the two responses. Never let
+   efficiency override a difference found in 1-4.
 
-Any new failure-mode behavior (an error, a broken tool call, a claim not
-supported by the transcript) loses outright regardless of efficiency.
+Any new failure-mode behavior in one response and not the other (an error, a
+broken or invalid tool call, a claim the transcript does not support) loses
+outright regardless of where it falls in the list above.
 
 Latency or timing claims in a response are only trustworthy when the
 underlying span's duration_source is "measured" -- do not reward a response
 for citing a derived or unknown duration as if it were fact, and do not
 penalize a response for declining to make an unsupported timing claim.
 
-Ties are a legitimate, expected verdict on easy prompts. Do not force a
-preference where the two responses are substantively equivalent -- an
-inflated preference is noise, not signal.
+A genuine tie on questions 1-5 is the correct, expected verdict on easy
+prompts -- report it. Do not manufacture a preference between two responses
+that are substantively equivalent; an inflated preference is noise, not
+signal.
 
 Return ONLY JSON matching the provided schema: winner is "1" if Response 1 is
-better, "2" if Response 2 is better, "tie" otherwise.
+better, "2" if Response 2 is better, "tie" otherwise. In `reason`, name the
+specific question above that decided it (or say the two tied on all of them).
 """
 
 
@@ -299,6 +327,33 @@ def judge_pair(prompt, response_a, response_b, *, grok=None, model=None):
         reason=(raw1.get("reason", "") if isinstance(raw1, dict) else ""),
         raw=[raw1, raw2],
     )
+
+
+def judge_consistency(grades):
+    """Aggregate `judge.consistent` across a list of Grades into one published
+    number, over pairs where a judge actually ran (Grade.judge is not None).
+
+    A win rate is a much weaker claim from a judge that agrees with its own
+    position swap 60% of the time than from one at 95% -- a reader cannot
+    tell the difference between those two unless this is printed alongside
+    the win rate, so this is a first-class output, not folded silently into
+    the tie bucket. Published pairwise-LLM-judge baselines run ~70-77%
+    consistency with 25-50% flip rates (Zheng et al. 2023, arXiv:2306.05685).
+    """
+    judged = [g["judge"] for g in grades if g.get("judge") is not None]
+    pairs = len(judged)
+    agreed = sum(1 for j in judged if j.get("consistent"))
+    rate = (agreed / pairs) if pairs else None
+
+    if pairs == 0:
+        note = "no judged pairs -- consistency is undefined"
+    elif pairs < 5:
+        note = (f"only {pairs} judged pair(s) -- this rate is itself an "
+                 "unreliable estimate at this sample size")
+    else:
+        note = ""
+
+    return {"pairs": pairs, "agreed": agreed, "rate": rate, "note": note}
 
 
 # --- matrix ------------------------------------------------------------------

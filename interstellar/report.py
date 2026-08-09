@@ -30,26 +30,60 @@ import socketserver
 from datetime import datetime, timezone
 from pathlib import Path
 
+from interstellar.stats import EFFECT_TO_EFFICIENCY_METRIC
 from interstellar.types import (
     ARM_CONTROL,
     ARM_TREATMENT,
-    EFFECT_MCP_STARTUP_MS,
-    EFFECT_SKILL_TOKENS,
-    EFFECT_TOOL_CALLS,
-    EFFECT_TOOL_RESULT_TOKENS,
-    EFFECT_WALL_MS,
     EFFICIENCY_METRICS,
     make_report,
 )
 
 # --- cross-patch caveats -----------------------------------------------------
+#
+# These are real, measured limitations of this experiment, not fine print —
+# the report's credibility rests on rendering them prominently. Three are
+# cycle-wide (constant regardless of which patches ran) and are generated
+# here so they can never be silently dropped; the rest are computed from the
+# actual patch_results so they say something true about *this* cycle, not a
+# canned disclaimer.
 
 ISOLATION_NOTE = (
-    "Control and treatment each ran k paired repeats in their own isolated "
-    "sandbox (separate git worktree/copy and GROK_HOME); the user's original "
-    "recorded session is not reused as the control, since it ran in a "
-    "different environment."
+    "Isolation is partial: GROK_HOME sandboxing covers $GROK_HOME/skills/ "
+    "only. The harness's bundled skills (~22) plus anything under "
+    "~/.agents/skills/ remain visible to both arms. They are constant across "
+    "control and treatment, so paired deltas stay valid, but the absolute "
+    "numbers in the tables below are not a clean-room measurement."
 )
+
+CONTROL_IS_RERUN_NOTE = (
+    "The control arm is the unpatched harness re-run under this cycle's "
+    "isolation, not the user's original recorded session — that original "
+    "run ran in a different environment and is shown for context only, "
+    "never as the statistical baseline."
+)
+
+
+def _small_n_caveat(k):
+    """At k<10 no statistic here can reach conventional significance by
+    construction (research-methods.md §1): the exact sign-flip permutation
+    test's best possible two-sided p at n=k is 2*(0.5)^k — 0.25 at k=3,
+    0.0625 at k=5 — and a percentile bootstrap on k points has too few
+    distinct resamples (C(2k-1,k)) to have characterized coverage. State the
+    actual floor for this cycle's k rather than a generic warning."""
+    k = int(k)
+    if k and k < 10:
+        floor = 2 * (0.5 ** k)
+        return (
+            f"k={k} paired repeats per patch. At this sample size no "
+            f"statistic below can reach conventional significance by "
+            f"construction — the exact sign-flip permutation test's best "
+            f"possible two-sided p-value at n={k} is {floor:.3g}, and a "
+            f"percentile bootstrap on {k} points has too few distinct "
+            f"resamples for characterized coverage. Every number here is a "
+            f"directional signal, not proof — that is why gates land on "
+            f"PROVISIONAL or DIRECTIONAL rather than ACCEPTED at this k."
+        )
+    return f"k={k} paired repeats per arm, per patch."
 
 
 def _walk_insufficient(node) -> bool:
@@ -68,8 +102,18 @@ def _walk_insufficient(node) -> bool:
 
 
 def _judge_consistency(patch_results):
+    """Prefer each patch's own statistics["judge_consistency"] (pinned
+    shape: {pairs, agreed, rate, note}) so the cycle-wide caveat and the
+    per-patch figure are computed from the same numbers; fall back to
+    walking grades[].judge directly for a patch_result that predates that
+    field."""
     total = consistent = 0
     for pr in patch_results:
+        jc = (pr.get("statistics") or {}).get("judge_consistency")
+        if isinstance(jc, dict) and jc.get("pairs") is not None:
+            total += jc.get("pairs", 0)
+            consistent += jc.get("agreed", 0)
+            continue
         for grade in pr.get("grades", []) or []:
             judge = grade.get("judge")
             if not judge:
@@ -88,20 +132,31 @@ def _insufficient_patch_ids(patch_results):
     return ids
 
 
+# Published baseline position-consistency for pairwise LLM judges runs
+# ~70-77% (research-methods.md §3). Below that, the win rate is noisy
+# because of the judge, not because the patches are actually tied.
+CONSISTENCY_BASELINE_FLOOR = 0.70
+
+
 def default_caveats(k, patch_results):
-    """The caveats block: k, isolation note, judge consistency rate,
-    insufficient-sample flags. Always non-empty, always rendered verbatim by
-    write() — this is the trust layer, not fine print."""
-    caveats = [f"k={int(k)} paired repeats per arm, per patch."]
-    caveats.append(ISOLATION_NOTE)
+    """The caveats block: k (with the honest small-n floor), the partial-
+    isolation note, the control-is-a-rerun note, judge consistency rate,
+    and insufficient-sample flags. Always non-empty, always rendered
+    prominently by write() — this is the trust layer, not fine print."""
+    caveats = [_small_n_caveat(k), ISOLATION_NOTE, CONTROL_IS_RERUN_NOTE]
 
     consistent, total = _judge_consistency(patch_results)
     if total:
         rate = consistent / total
+        low = (
+            f" — below the ~{CONSISTENCY_BASELINE_FLOOR:.0%}-77% baseline "
+            f"for pairwise LLM judges; discount the win rates accordingly"
+            if rate < CONSISTENCY_BASELINE_FLOOR else ""
+        )
         caveats.append(
             f"Judge consistency: {consistent}/{total} position-swapped pairs "
-            f"agreed on a winner ({rate:.0%}); an inconsistent pair is scored "
-            f"as a tie, never resolved toward either side."
+            f"agreed on a winner ({rate:.0%}){low}; an inconsistent pair is "
+            f"scored as a tie, never resolved toward either side."
         )
     else:
         caveats.append("No judged pairs were available for this cycle.")
@@ -109,9 +164,10 @@ def default_caveats(k, patch_results):
     flagged = _insufficient_patch_ids(patch_results)
     if flagged:
         caveats.append(
-            "Insufficient samples for a confident interval on: "
+            "Point estimates only (no credible interval) for: "
             + ", ".join(str(p) for p in flagged)
-            + " — treat those point estimates as directional only, not proof."
+            + " — shown with their mean/rate rather than omitted, per the "
+            "insufficient-samples rule: a small sample is not a zero."
         )
     return caveats
 
@@ -166,15 +222,6 @@ METRIC_LABELS = {
     "turns": "Turns",
 }
 
-# expected_effect (types.ALL_EFFECTS) -> the efficiency metric it claims to move
-EFFECT_TO_METRIC = {
-    EFFECT_SKILL_TOKENS: "skill_tokens_est",
-    EFFECT_TOOL_CALLS: "tool_calls",
-    EFFECT_MCP_STARTUP_MS: "mcp_startup_ms",
-    EFFECT_TOOL_RESULT_TOKENS: "tool_result_tokens_est",
-    EFFECT_WALL_MS: "wall_ms",
-}
-
 
 def _esc(x) -> str:
     return html.escape(str(x if x is not None else "—"))
@@ -202,15 +249,42 @@ def _fmt_pct(x):
     return f"{x:+.1%}"
 
 
-def _ci_text(ci):
-    if not ci:
-        return "insufficient samples"
-    lo, hi = ci.get("lo"), ci.get("hi")
+def _interval_dict(d):
+    """The pinned per-patch `statistics["efficiency"][metric]` shape carries
+    lo/hi/note flat on the metric dict itself (no nested "bootstrap"). Read
+    that first; fall back to a nested paired_bootstrap()-shaped sub-dict
+    (stats.py's own raw shape, key "bootstrap", or the older "ci") in case
+    a raw stats.py dict slips through un-flattened."""
+    if not d:
+        return {}
+    if d.get("lo") is not None or d.get("hi") is not None or "lo" in d:
+        return d
+    return d.get("bootstrap") or d.get("ci") or {}
+
+
+def _interval_text(d):
+    """lo/hi is None whenever note=="insufficient_samples" (n<10) — stats.py
+    never fabricates a CI from too few points. The abs_delta/pct_delta point
+    estimate is shown in its own column regardless, so this cell only needs
+    to say why there's no interval, never an empty cell or a bare dash.
+    note=="low_confidence" (10<=n<20) means an interval IS present but
+    flagged; distinct_resamples (math.comb(2n-1,n)) explains the "why" for
+    either case rather than just asserting it."""
+    d = _interval_dict(d)
+    lo, hi, note = d.get("lo"), d.get("hi"), d.get("note")
+    dr = d.get("distinct_resamples")
     if lo is None or hi is None:
-        note = ci.get("note") or ci.get("reason")
-        return "insufficient samples" + (f" ({note})" if note else "")
-    level = ci.get("level", 0.95)
-    return f"[{_fmt_num(lo)}, {_fmt_num(hi)}] ({level:.0%} CI)"
+        text = "insufficient samples for a CI"
+        if note and note != "insufficient_samples":
+            text += f" ({note})"
+        if dr:
+            text += f" — only {dr} distinct resample{'s' if dr != 1 else ''} at this n"
+        return text
+    level = d.get("level", 0.95)
+    text = f"[{_fmt_num(lo)}, {_fmt_num(hi)}] ({level:.0%} CI)"
+    if note == "low_confidence":
+        text += " — low confidence" + (f" ({dr} distinct resamples)" if dr else "")
+    return text
 
 
 def _diff_html(diff_text):
@@ -236,7 +310,10 @@ def _metric_row(name, lower_is_better, m, highlight=False):
     if not m:
         return ""
     label = METRIC_LABELS.get(name, name)
-    delta_abs = m.get("delta_abs")
+    # Pinned shape (statistics["efficiency"][metric]): abs_delta/pct_delta,
+    # not delta_abs/delta_pct. Fall back to the older names defensively.
+    delta_abs = m.get("abs_delta", m.get("delta_abs"))
+    delta_pct = m.get("pct_delta", m.get("delta_pct"))
     cls = "neutral"
     if delta_abs is not None and delta_abs != 0:
         improved = (delta_abs < 0) if lower_is_better else (delta_abs > 0)
@@ -248,8 +325,8 @@ def _metric_row(name, lower_is_better, m, highlight=False):
         f"<td>{_fmt_num(m.get('control_median'))}</td>"
         f"<td>{_fmt_num(m.get('treatment_median'))}</td>"
         f"<td>{_fmt_delta(delta_abs)}</td>"
-        f"<td>{_fmt_pct(m.get('delta_pct'))}</td>"
-        f"<td>{_esc(_ci_text(m.get('ci')))}</td>"
+        f"<td>{_fmt_pct(delta_pct)}</td>"
+        f"<td>{_esc(_interval_text(m))}</td>"
         f"</tr>"
     )
 
@@ -271,7 +348,15 @@ def _metrics_table(efficiency, metric_target):
     )
 
 
-def _wtl_bar(win_rate):
+def _win_rate_block(win_rate, judge_consistency=None):
+    """win/tie/loss bar + rate, with judge_consistency (a SEPARATE key in
+    the pinned statistics shape, not nested under win_rate) rendered
+    directly beneath it — adjacent to the number it qualifies.
+
+    All-ties (note=="no_decided_pairs") is a normal, common result — the
+    judge finding the two harnesses equivalent is real evidence, not
+    missing data — and must render as a deliberate reading ("N ties, no
+    decided pairs"), not as an empty/n-a widget."""
     win_rate = win_rate or {}
     wins, ties, losses = win_rate.get("wins", 0), win_rate.get("ties", 0), win_rate.get("losses", 0)
     total = wins + ties + losses
@@ -288,12 +373,22 @@ def _wtl_bar(win_rate):
         + seg("loss", losses, "treatment losses")
         + "</div>"
     )
-    rate, lo, hi = win_rate.get("rate"), win_rate.get("lo"), win_rate.get("hi")
-    if rate is None:
-        rate_txt = "win rate: n/a"
+    rate, lo, hi, note = win_rate.get("rate"), win_rate.get("lo"), win_rate.get("hi"), win_rate.get("note")
+    if note == "no_decided_pairs" or (rate is None and wins == 0 and losses == 0 and ties > 0):
+        rate_txt = (
+            f"{ties} tie{'s' if ties != 1 else ''}, no decided pairs — the judge "
+            f"found the two harnesses equivalent on every judged run"
+        )
+    elif rate is None:
+        rate_txt = "win rate: n/a" + (f" ({note})" if note else "")
     else:
         rate_txt = f"win rate over decided pairs: {rate:.0%}"
-        rate_txt += f" [{lo:.0%}, {hi:.0%}] 95% CI" if lo is not None and hi is not None else " (insufficient samples for a CI)"
+        if lo is not None and hi is not None:
+            rate_txt += f" [{lo:.0%}, {hi:.0%}] 95% CI"
+            if note == "low_confidence":
+                rate_txt += " (low confidence)"
+        else:
+            rate_txt += " (insufficient samples for a CI)"
     legend = (
         '<div class="wtl-legend">'
         f'<span class="wtl-dot wtl-win"></span>wins {wins} '
@@ -302,25 +397,123 @@ def _wtl_bar(win_rate):
         f'<span class="muted"> &middot; {_esc(rate_txt)}</span>'
         "</div>"
     )
-    return bar + legend
+    # Position consistency: the fraction of position-swapped pairs where the
+    # judge agreed on a winner both orders. Published baselines for pairwise
+    # LLM judges run ~70-77% — put it right next to the win rate it qualifies
+    # (research-methods.md §3), not buried, and flag it visibly when low.
+    jc = judge_consistency or {}
+    cons_rate = jc.get("rate")
+    consistency_html = ""
+    if cons_rate is not None:
+        low = cons_rate < CONSISTENCY_BASELINE_FLOOR
+        pairs, agreed = jc.get("pairs"), jc.get("agreed")
+        cons_txt = f"position consistency: {cons_rate:.0%}"
+        if pairs is not None and agreed is not None:
+            cons_txt += f" ({agreed}/{pairs} pairs)"
+        if low:
+            cons_txt += " — below the ~70-77% published baseline; discount the win rate above"
+        consistency_html = f'<div class="stat-line{" consistency-low" if low else ""}">{_esc(cons_txt)}</div>'
+    elif jc.get("note"):
+        consistency_html = f'<div class="stat-line muted">position consistency: {_esc(jc["note"])}</div>'
+    return bar + legend + consistency_html
 
 
-def _extra_stats(stats):
-    parts = []
-    sign_test = stats.get("sign_test")
-    if isinstance(sign_test, dict) and sign_test.get("p") is not None:
-        parts.append(
-            f'<div class="stat-line">Sign test: p={sign_test["p"]:.3f}, '
-            f'direction={_esc(sign_test.get("direction"))}, '
-            f'n<sub>nonzero</sub>={_esc(sign_test.get("n_nonzero"))}</div>'
+def _permutation_line(stats):
+    """The honest replacement for a plain sign test at small n
+    (research-methods.md §1): carries min_achievable_p, the smallest
+    two-sided p this sample size could ever produce. When the observed p
+    equals that floor, "not significant" is the wrong reading — it's "as
+    extreme as this sample size permits," which is evidence of nothing,
+    not evidence of no effect. Pinned key is "permutation"; fall back to
+    stats.py's own function-name keys for resilience."""
+    perm = stats.get("permutation") or stats.get("permutation_test") or stats.get("sign_test")
+    if not isinstance(perm, dict) or perm.get("p") is None:
+        return ""
+    p = perm["p"]
+    min_p = perm.get("min_achievable_p")
+    n_nz = perm.get("n_nonzero", perm.get("n"))
+    direction = perm.get("direction")
+    note = perm.get("note")
+    if min_p is not None and abs(p - min_p) < 1e-9:
+        p_txt = f"p={p:.3g} (as extreme as n={_esc(n_nz)} permits — not evidence of no effect)"
+    else:
+        p_txt = f"p={p:.3g}"
+    extra = f", {_esc(note)}" if note else ""
+    return (
+        f'<div class="stat-line">Sign-flip permutation test: {p_txt}, '
+        f'direction={_esc(direction)}, n<sub>nonzero</sub>={_esc(n_nz)}{extra}</div>'
+    )
+
+
+def _pass_k_line(stats):
+    """Pinned shape is a single flat {value, n, c, k, degenerate, note}
+    dict (the treatment's pass^k reliability reading, our v1 one-prompt-
+    per-patch design), not a {control, treatment} pair — but a legacy
+    per-arm shape is still handled so this never crashes on drift."""
+    pk = stats.get("pass_k")
+    if not isinstance(pk, dict):
+        return ""
+    if "control" in pk or "treatment" in pk:
+        return (
+            f'<div class="stat-line">pass&#94;k: control {_fmt_pass_k(pk.get("control"))} '
+            f'&rarr; treatment {_fmt_pass_k(pk.get("treatment"))}</div>'
         )
-    pass_k = stats.get("pass_k")
-    if isinstance(pass_k, dict) and pass_k.get("control") is not None and pass_k.get("treatment") is not None:
-        parts.append(
-            f'<div class="stat-line">pass@k: control {pass_k["control"]:.0%} '
-            f'&rarr; treatment {pass_k["treatment"]:.0%}</div>'
+    if "value" not in pk and "degenerate" not in pk:
+        return ""
+    k = pk.get("k")
+    label = f"pass&#94;{_esc(k)}" if k is not None else "pass&#94;k"
+    detail = f" (c={_esc(pk.get('c'))}/n={_esc(pk.get('n'))})" if pk.get("c") is not None else ""
+    note = pk.get("note")
+    # degenerate's own note (e.g. "n_equals_k: 0/1 indicator...") restates
+    # what _fmt_pass_k's "(flag, n=k — not a rate)" phrasing already says —
+    # skip it there to avoid saying the same thing twice.
+    note_txt = f", {_esc(note)}" if note and note != "k_exceeds_n" and not pk.get("degenerate") else ""
+    if note == "k_exceeds_n":
+        return f'<div class="stat-line">{label}: n/a (k exceeds n, no batch large enough yet)</div>'
+    return f'<div class="stat-line">{label}: {_fmt_pass_k(pk)}{detail}{note_txt}</div>'
+
+
+def _regressions_html(stats):
+    """Flat list of make_regression() dicts across the patch's grades. The
+    gate cites high-severity ones in its reasons already; showing the full
+    list (medium/low included) is the transparency the gate reasons alone
+    don't give a reader deciding whether to trust a PROVISIONAL/DIRECTIONAL
+    patch."""
+    regs = stats.get("regressions") or []
+    if not regs:
+        return ""
+    items = []
+    for r in regs:
+        severity = r.get("severity", "low")
+        evidence = f" &mdash; {_esc(r.get('evidence'))}" if r.get("evidence") else ""
+        items.append(
+            f'<li class="regression-{_esc(severity)}">'
+            f'<span class="regression-sev">{_esc(severity)}</span> '
+            f'{_esc(r.get("kind"))}: {_esc(r.get("detail"))}{evidence}</li>'
         )
-    return "".join(parts)
+    return (
+        '<div class="section-label">Regressions observed</div>'
+        f'<ul class="regressions">{"".join(items)}</ul>'
+    )
+
+
+def _fmt_pass_k(v):
+    """pass^k (tau-bench reliability reading) can arrive as a bare float or
+    as {value, degenerate}. degenerate=True (n==k) means the number is a 0/1
+    "did all k runs succeed" flag, not a probability — label it as a flag,
+    never format it as a percentage (research-methods.md §2)."""
+    if v is None:
+        return "n/a"
+    if isinstance(v, dict):
+        val = v.get("value", v.get("pass_k"))
+        degenerate = bool(v.get("degenerate"))
+    else:
+        val, degenerate = v, False
+    if val is None:
+        return "n/a"
+    if degenerate:
+        return ("all k succeeded" if val >= 1 else "not all k succeeded") + " (flag, n=k — not a rate)"
+    return f"{val:.0%}"
 
 
 def _matrix_summary_line(matrix):
@@ -335,7 +528,53 @@ def _matrix_summary_line(matrix):
     return " · ".join(parts)
 
 
-def _patch_card(pr, idx):
+def _gate_badge(gate):
+    """Three honest states, not accept/reject (research-methods.md, gate
+    follow-up). At small k the gate legitimately cannot accept most patches
+    — that is the normal case for this demo, not a failure, so a patch that
+    only has directional evidence must never render as a red REJECT: the
+    right next action is "run more repeats," not "throw this away."
+
+      ACCEPTED               — statistics support it outright.
+      PROVISIONAL            — passed the available checks; k caps the claim.
+      DIRECTIONAL: <reading>  — evidence leans somewhere; k cannot confirm it.
+
+    Falls back to a legacy REJECT only for a gate dict that predates the
+    provisional/directional fields entirely (accepted=False and neither key
+    present) so an old-shaped gate still renders instead of crashing.
+    """
+    if gate.get("accepted"):
+        return '<span class="badge accept">ACCEPTED</span>'
+    if gate.get("provisional"):
+        return '<span class="badge provisional">PROVISIONAL</span>'
+    if "directional" in gate:
+        reading = (gate.get("directional") or "neutral").lower()
+        cls = {"favorable": "directional-favorable", "unfavorable": "directional-unfavorable"}.get(
+            reading, "directional-neutral"
+        )
+        return f'<span class="badge {cls}">DIRECTIONAL &middot; {_esc(reading.upper())}</span>'
+    return '<span class="badge reject">REJECT</span>'
+
+
+def _patch_specific_caveats(caveats, target, patch_id):
+    """Cycle-wide caveats (report["caveats"]) that happen to name this
+    patch's target or id — e.g. "skill.remove is a no-op for <target>
+    because it also exists under an uncontrolled root" — surfaced inline
+    next to that patch's own numbers, in addition to the persistent
+    cycle-wide panel. Caveats are plain strings (frozen contract), so this
+    is a text match, not a structured link — duplication across the panel
+    and the card is intentional: the trust signal belongs next to the
+    number it qualifies, not only in a list the reader may have skimmed."""
+    needles = [str(n).lower() for n in (target, patch_id) if n]
+    hits = []
+    for c in caveats or []:
+        low = c.lower()
+        if any(n in low for n in needles):
+            hits.append(c)
+    return hits
+
+
+def _patch_card(pr, idx, caveats=None):
     patch = pr.get("patch") or {}
     application = pr.get("application") or {}
     stats = pr.get("statistics") or {}
@@ -352,11 +591,7 @@ def _patch_card(pr, idx):
     applied = application.get("applied", False)
     skip_reason = patch.get("skipped_reason") or (not applied and application.get("reason"))
 
-    accepted = bool(gate.get("accepted"))
-    gate_badge = (
-        f'<span class="badge {"accept" if accepted else "reject"}">'
-        f'{"ACCEPT" if accepted else "REJECT"}</span>'
-    )
+    gate_badge = _gate_badge(gate)
     reasons = gate.get("reasons") or []
     reasons_html = "".join(f"<li>{_esc(r)}</li>" for r in reasons) or '<li class="muted">No reasons recorded.</li>'
 
@@ -364,17 +599,35 @@ def _patch_card(pr, idx):
     if skip_reason:
         diff_block = f'<p class="muted">Not applied: {_esc(skip_reason)}</p>' + diff_block
 
-    metric_target = EFFECT_TO_METRIC.get(expected_effect)
+    # statistics["primary_effect"] is an EFFECT_* name (types.ALL_EFFECTS,
+    # e.g. "skill_tokens"), the same value summarize()/gate() were called
+    # with — NOT an EFFICIENCY_METRICS name by itself (e.g. "skill_tokens"
+    # vs. the metric it actually measures, "skill_tokens_est"). Map it
+    # through stats.EFFECT_TO_EFFICIENCY_METRIC, the single canonical
+    # mapping the CLI, gate(), and this report all share. Falls back to the
+    # patch's own expected_effect (types.make_patch, frozen) if statistics
+    # didn't carry primary_effect for some reason.
+    primary_effect = stats.get("primary_effect") or expected_effect
+    metric_target = EFFECT_TO_EFFICIENCY_METRIC.get(primary_effect)
     table_html = _metrics_table(stats.get("efficiency") or {}, metric_target)
-    wtl_html = _wtl_bar(stats.get("win_rate"))
-    extra_html = _extra_stats(stats)
+    wtl_html = _win_rate_block(stats.get("win_rate"), stats.get("judge_consistency"))
+    extra_html = _permutation_line(stats) + _pass_k_line(stats)
+    regressions_html = _regressions_html(stats)
     matrix_line = _matrix_summary_line(matrix)
 
     meta_bits = [f"expects to move <strong>{_esc(expected_effect)}</strong>"]
     if source_rec:
         meta_bits.append(f"from recommendation <em>{_esc(source_rec)}</em>")
+    if stats.get("n") is not None:
+        meta_bits.append(f"n={_esc(stats.get('n'))} measured")
     if matrix_line:
         meta_bits.append(_esc(matrix_line))
+
+    patch_caveats = _patch_specific_caveats(caveats, target, patch_id)
+    patch_caveats_html = ""
+    if patch_caveats:
+        items = "".join(f"<li>{_esc(c)}</li>" for c in patch_caveats)
+        patch_caveats_html = f'<ul class="patch-caveats">{items}</ul>'
 
     return f"""
     <article class="patch-card" id="{_esc(patch_id)}">
@@ -388,6 +641,7 @@ def _patch_card(pr, idx):
       </div>
       <div class="patch-meta muted">{" &middot; ".join(meta_bits)}</div>
       <p class="rationale">{_esc(patch.get("rationale"))}</p>
+      {patch_caveats_html}
       <div class="patch-body">
         <div class="diff-col">
           <div class="section-label">Diff</div>
@@ -399,6 +653,7 @@ def _patch_card(pr, idx):
           <div class="section-label">Judge outcome (treatment vs. control)</div>
           {wtl_html}
           {extra_html}
+          {regressions_html}
           <div class="section-label">Gate</div>
           <ul class="reasons">{reasons_html}</ul>
         </div>
@@ -449,14 +704,17 @@ def render_html(report) -> str:
     </section>
     """
 
-    cards = "\n".join(_patch_card(pr, i) for i, pr in enumerate(patch_results, 1))
+    cards = "\n".join(_patch_card(pr, i, caveats=caveats) for i, pr in enumerate(patch_results, 1))
     if not cards:
         cards = '<p class="muted">No candidate patches were produced for this session.</p>'
 
+    # Caveats are the trust layer, not a footnote: rendered first, right
+    # under the header, in a visually distinct panel — never collapsed by
+    # default, never scrolled past to reach the numbers they qualify.
     caveats_html = "".join(f"<li>{_esc(c)}</li>" for c in caveats)
     caveats_section = f"""
     <section class="caveats">
-      <div class="section-label">Caveats &mdash; read before trusting the numbers above</div>
+      <div class="caveats-title">&#9888; Read before trusting the numbers below</div>
       <ul>{caveats_html}</ul>
     </section>
     """
@@ -472,11 +730,11 @@ def render_html(report) -> str:
 <body>
 {header}
 <main class="content">
+{caveats_section}
 {session_section}
 <section class="patches">
 {cards}
 </section>
-{caveats_section}
 </main>
 <script>{_SCRIPT}</script>
 </body>
@@ -505,6 +763,16 @@ _STYLE = """
   --del-bg: rgba(248, 113, 113, 0.12);
   --del-fg: #fca5a5;
   --hunk-fg: #93c5fd;
+  --warn: #fbbf24;
+  --warn-dim: rgba(251, 191, 36, 0.12);
+  --provisional: #38bdf8;
+  --provisional-dim: rgba(56, 189, 248, 0.14);
+  --favorable: #38bdf8;
+  --favorable-dim: rgba(56, 189, 248, 0.14);
+  --unfavorable: #fb923c;
+  --unfavorable-dim: rgba(251, 146, 60, 0.14);
+  --neutral-reading: #94a3b8;
+  --neutral-reading-dim: rgba(148, 163, 184, 0.12);
   --radius: 8px;
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
@@ -530,6 +798,16 @@ _STYLE = """
     --del-bg: rgba(220, 38, 38, 0.10);
     --del-fg: #991b1b;
     --hunk-fg: #1d4ed8;
+    --warn: #b45309;
+    --warn-dim: rgba(180, 83, 9, 0.10);
+    --provisional: #0369a1;
+    --provisional-dim: rgba(3, 105, 161, 0.10);
+    --favorable: #0369a1;
+    --favorable-dim: rgba(3, 105, 161, 0.10);
+    --unfavorable: #c2410c;
+    --unfavorable-dim: rgba(194, 65, 12, 0.10);
+    --neutral-reading: #64748b;
+    --neutral-reading-dim: rgba(100, 116, 139, 0.10);
   }
 }
 * { box-sizing: border-box; }
@@ -586,13 +864,53 @@ h1, h2, h3 { margin: 0; }
 }
 .section-label:first-child { margin-top: 0; }
 
-.session-card, .patch-card, .caveats {
+.session-card, .patch-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 0.95rem 1.05rem;
   margin-bottom: 1rem;
 }
+
+/* Caveats are the trust layer, not a footnote: a visually distinct panel,
+   first thing under the header, never collapsed and never muted-gray. */
+.caveats {
+  background: var(--warn-dim);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 0.85rem 1.05rem;
+  margin-bottom: 1.1rem;
+}
+.caveats-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--warn);
+  margin-bottom: 0.4rem;
+}
+.caveats ul { margin: 0; padding-left: 1.2rem; font-size: 13px; }
+.caveats li { margin-bottom: 0.4rem; }
+.caveats li:last-child { margin-bottom: 0; }
+
+/* Per-patch caveats: the same warning tone, scoped to one card. */
+ul.patch-caveats {
+  list-style: none;
+  margin: 0 0 0.7rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+ul.patch-caveats li {
+  background: var(--warn-dim);
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  font-size: 12px;
+  color: var(--text);
+}
+ul.patch-caveats li::before { content: "\26A0  "; color: var(--warn); }
 .prompt-block {
   white-space: pre-wrap;
   word-break: break-word;
@@ -642,6 +960,12 @@ h1, h2, h3 { margin: 0; }
 .badge.kind { color: #93c5fd; border-color: #334155; text-transform: none; }
 .badge.accept { color: var(--good); border-color: var(--good); background: var(--good-dim); }
 .badge.reject { color: var(--bad); border-color: var(--bad); background: var(--bad-dim); }
+/* A patch that only has directional evidence at small k is not a failure —
+   it needs one more cycle of repeats, not a red badge implying it's bad. */
+.badge.provisional { color: var(--provisional); border-color: var(--provisional); background: var(--provisional-dim); }
+.badge.directional-favorable { color: var(--favorable); border-color: var(--favorable); background: var(--favorable-dim); }
+.badge.directional-unfavorable { color: var(--unfavorable); border-color: var(--unfavorable); background: var(--unfavorable-dim); }
+.badge.directional-neutral { color: var(--neutral-reading); border-color: var(--neutral-reading); background: var(--neutral-reading-dim); }
 
 .patch-body { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 1.1rem; align-items: start; }
 @media (max-width: 860px) { .patch-body { grid-template-columns: 1fr; } }
@@ -689,12 +1013,20 @@ table.metrics tr.hl { background: var(--accent-dim); }
 .wtl-dot.wtl-loss { background: var(--bad); }
 
 .stat-line { font-size: 12px; color: var(--muted); margin-top: 0.3rem; }
+.stat-line.consistency-low { color: var(--warn); font-weight: 600; }
 
 ul.reasons { margin: 0; padding-left: 1.1rem; font-size: 12.5px; }
 ul.reasons li { margin-bottom: 0.2rem; }
 
-.caveats ul { margin: 0; padding-left: 1.2rem; font-size: 13px; }
-.caveats li { margin-bottom: 0.35rem; }
+ul.regressions { list-style: none; margin: 0 0 0.4rem; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+ul.regressions li { border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.55rem; font-size: 12px; }
+.regression-sev { text-transform: uppercase; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; margin-right: 0.35rem; padding: 0.05rem 0.35rem; border-radius: 4px; }
+li.regression-high { border-color: var(--bad); background: var(--bad-dim); }
+li.regression-high .regression-sev { color: var(--bad); background: rgba(0,0,0,0.15); }
+li.regression-medium { border-color: var(--warn); background: var(--warn-dim); }
+li.regression-medium .regression-sev { color: var(--warn); background: rgba(0,0,0,0.15); }
+li.regression-low { border-color: var(--border-strong); }
+li.regression-low .regression-sev { color: var(--muted); }
 """
 
 _SCRIPT = """

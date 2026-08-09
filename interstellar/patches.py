@@ -199,39 +199,129 @@ def _lines_in_ranges(ranges) -> int:
     return sum(max(0, end - start + 1) for start, end in ranges)
 
 
+def _validate_and_coalesce_ranges(ranges, skill_lines=None):
+    """Validate each cited range individually (1-based, start<=end, and
+    within the skill's length when known), then sort and coalesce
+    overlapping and adjacent (prev_end + 1 == next_start) ranges into one.
+
+    This is normalization, not reinterpretation: coalescing never changes
+    which lines are deleted, only how the same deletion is spelled, so the
+    total touched-line count is identical before and after. An individually
+    invalid range is dropped on its own, with a note; it does not take the
+    whole patch down with it.
+
+    Returns (coalesced_ranges, drop_notes).
+    """
+    valid = []
+    notes = []
+    for r in ranges:
+        if len(r) != 2 or not all(isinstance(x, int) and not isinstance(x, bool) for x in r):
+            notes.append(f"dropped malformed range {r!r}")
+            continue
+        start, end = r
+        if start < 1 or end < start:
+            notes.append(f"dropped invalid range [{start}, {end}]: not 1-based/ordered")
+            continue
+        if skill_lines is not None and end > skill_lines:
+            notes.append(f"dropped range [{start}, {end}]: exceeds skill length "
+                         f"({skill_lines} lines)")
+            continue
+        valid.append((start, end))
+
+    valid.sort()
+    coalesced = []
+    for start, end in valid:
+        if coalesced and start <= coalesced[-1][1] + 1:
+            prev_start, prev_end = coalesced[-1]
+            coalesced[-1] = (prev_start, max(prev_end, end))
+        else:
+            coalesced.append((start, end))
+    return [list(r) for r in coalesced], notes
+
+
+def _count_orphans(text, ranges):
+    """Count dangling fragments a verbatim range-deletion would leave in
+    `text`: (a) '## ' headings immediately followed by another heading or
+    EOF (a heading whose body was deleted), and (b) non-blank lines that
+    immediately follow a deleted region which itself contained a heading (a
+    body paragraph whose heading was deleted).
+
+    This is a measurement, not a fixer: it neither repairs nor rejects the
+    patch, only reports what partial-section deletion would leave behind.
+    """
+    original = text.splitlines()
+    deleted = set()
+    for start, end in ranges:
+        deleted.update(range(start, end + 1))
+
+    survivors = [(i, line) for i, line in enumerate(original, start=1)
+                 if i not in deleted]
+    n = len(survivors)
+
+    count = 0
+    for k, (lineno, line) in enumerate(survivors):
+        if line.startswith("## "):
+            if k + 1 == n or survivors[k + 1][1].startswith("## "):
+                count += 1
+            continue
+        if not line.strip():
+            continue
+        # Walk back over the contiguous deleted block immediately preceding
+        # this survivor (if any); if it contained a heading, this line's
+        # owning heading is gone and it is now a stray paragraph.
+        j = lineno - 1
+        block_had_heading = False
+        while j >= 1 and j in deleted:
+            if original[j - 1].startswith("## "):
+                block_had_heading = True
+            j -= 1
+        if block_had_heading:
+            count += 1
+    return count
+
+
 # --- per-type patch builders ---------------------------------------------------
 
 def _skill_truncate_patch(rec, skill_index, patch_id):
     target = rec.get("target", "")
-    ranges = [list(r) for r in (rec.get("line_ranges") or [])]
-    rationale = _rationale(rec)
+    raw_ranges = [list(r) for r in (rec.get("line_ranges") or [])]
+    if not raw_ranges:
+        return make_patch(
+            patch_id=patch_id, kind=PATCH_SKILL_TRUNCATE, target=target,
+            rationale=_rationale(rec), expected_effect=EFFECT_SKILL_TOKENS,
+            source_recommendation=rec, line_ranges=[],
+            skipped_reason="skill_truncate recommendation cited no line_ranges")
+
+    skill = skill_index.get(target)
+    skill_lines = skill.get("lines") if skill is not None else None
+    ranges, drop_notes = _validate_and_coalesce_ranges(raw_ranges, skill_lines)
+
     if not ranges:
+        rationale = _rationale(rec, extra="; ".join(drop_notes) if drop_notes else None)
         return make_patch(
             patch_id=patch_id, kind=PATCH_SKILL_TRUNCATE, target=target,
             rationale=rationale, expected_effect=EFFECT_SKILL_TOKENS,
             source_recommendation=rec, line_ranges=[],
-            skipped_reason="skill_truncate recommendation cited no line_ranges")
+            skipped_reason="all cited line_ranges were invalid: " + "; ".join(drop_notes))
 
     skipped = None
-    skill = skill_index.get(target)
-    if skill is not None:
-        total_lines = skill.get("lines", 0)
-        for start, end in ranges:
-            if start < 1 or end < start or end > total_lines:
-                skipped = (f"line range [{start}, {end}] out of bounds for "
-                           f"{target!r} ({total_lines} lines)")
-                break
+    touched = _lines_in_ranges(ranges)
+    if touched > MAX_PATCH_LINES:
+        skipped = (f"truncate touches {touched} lines, exceeds "
+                   f"MAX_PATCH_LINES={MAX_PATCH_LINES}")
 
-    if skipped is None:
-        touched = _lines_in_ranges(ranges)
-        if touched > MAX_PATCH_LINES:
-            skipped = (f"truncate touches {touched} lines, exceeds "
-                       f"MAX_PATCH_LINES={MAX_PATCH_LINES}")
+    extra_parts = list(drop_notes)
+    if skill is not None:
+        orphans = _count_orphans(skill["content"], ranges)
+        plural = "" if orphans == 1 else "s"
+        extra_parts.append(
+            f"leaves {orphans} orphaned fragment{plural} from partial section deletion")
 
     return make_patch(
         patch_id=patch_id, kind=PATCH_SKILL_TRUNCATE, target=target,
-        rationale=rationale, expected_effect=EFFECT_SKILL_TOKENS,
-        source_recommendation=rec, line_ranges=ranges, skipped_reason=skipped)
+        rationale=_rationale(rec, extra="; ".join(extra_parts) if extra_parts else None),
+        expected_effect=EFFECT_SKILL_TOKENS, source_recommendation=rec,
+        line_ranges=ranges, skipped_reason=skipped)
 
 
 def _skill_remove_patches(rec, digest_skills, counter):

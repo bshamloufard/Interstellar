@@ -1,0 +1,300 @@
+{
+  "trace_file": "big_output_019fe41f.json",
+  "digest": {
+    "session": {
+      "id": "019fe41f-839b-7f01-b6c4-2df3e9e565d1",
+      "title": "Run 'cat /Users/sentorcc/Interstellar/Cargo.toml' and then name the three workspace members",
+      "model": "grok-4.5",
+      "wall_ms": 11162
+    },
+    "counts": {
+      "turns": 1,
+      "tool_calls": 1,
+      "skill_loads": 0,
+      "subagent_spawns": 0,
+      "mcp_calls": 0
+    },
+    "timing": {
+      "note": "all durations below are duration_source=measured",
+      "total_tool_ms": 42,
+      "permission_wait_ms": 1,
+      "mcp_startup_ms": 3195,
+      "slowest_measured": [
+        {
+          "tool": "run_terminal_command",
+          "ms": 42,
+          "kind": "tool",
+          "span": "call-3bd369ce-cdf7-42de-9a8a-3cb5d0ca7c94-0"
+        }
+      ]
+    },
+    "context_cost": {
+      "tool_result_tokens_est": 4060,
+      "skill_tokens_est": 0,
+      "skill_wasted_tokens_est": 0,
+      "largest_results": [
+        {
+          "tool": "run_terminal_command",
+          "bytes": 16241,
+          "span": "call-3bd369ce-cdf7-42de-9a8a-3cb5d0ca7c94-0"
+        }
+      ]
+    },
+    "skills_loaded": [],
+    "installed_skills_never_loaded": [
+      {
+        "skill": "algorithmic-art",
+        "bytes": 2697,
+        "tokens_est": 674
+      },
+      {
+        "skill": "brand-guidelines",
+        "bytes": 1606,
+        "tokens_est": 401
+      },
+      {
+        "skill": "db-migrate",
+        "bytes": 1718,
+        "tokens_est": 429
+      },
+      {
+        "skill": "ios-app-release",
+        "bytes": 3109,
+        "tokens_est": 777
+      },
+      {
+        "skill": "k8s-deploy",
+        "bytes": 1980,
+        "tokens_est": 495
+      },
+      {
+        "skill": "refactoring-patterns",
+        "bytes": 6023,
+        "tokens_est": 1505
+      },
+      {
+        "skill": "release-notes",
+        "bytes": 1766,
+        "tokens_est": 441
+      },
+      {
+        "skill": "requesting-code-review",
+        "bytes": 1705,
+        "tokens_est": 426
+      },
+      {
+        "skill": "security-review",
+        "bytes": 9343,
+        "tokens_est": 2335
+      },
+      {
+        "skill": "slack-gif-creator",
+        "bytes": 1908,
+        "tokens_est": 477
+      },
+      {
+        "skill": "test-driven-development",
+        "bytes": 1816,
+        "tokens_est": 454
+      },
+      {
+        "skill": "using-git-worktrees",
+        "bytes": 2271,
+        "tokens_est": 567
+      },
+      {
+        "skill": "writing-plans",
+        "bytes": 5720,
+        "tokens_est": 1430
+      }
+    ],
+    "discovery_after_skill_load": [],
+    "duplicate_calls": [],
+    "idle_mcp_servers": [
+      {
+        "server": "sequential-thinking",
+        "tools_exposed": 1,
+        "connect_ms": 484
+      },
+      {
+        "server": "memory",
+        "tools_exposed": 9,
+        "connect_ms": 519
+      },
+      {
+        "server": "runpod",
+        "tools_exposed": 54,
+        "connect_ms": 530
+      },
+      {
+        "server": "everything",
+        "tools_exposed": 13,
+        "connect_ms": 546
+      },
+      {
+        "server": "filesystem",
+        "tools_exposed": 14,
+        "connect_ms": 555
+      },
+      {
+        "server": "excalidraw",
+        "tools_exposed": 5,
+        "connect_ms": 561
+      }
+    ],
+    "failed_mcp_servers": [
+      {
+        "server": "time",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'time' handshake failed: connection closed: initialize response",
+        "wasted_ms": 509
+      },
+      {
+        "server": "fetch",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'fetch' handshake failed: connection closed: initialize response",
+        "wasted_ms": 601
+      },
+      {
+        "server": "git",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'git' handshake failed: connection closed: initialize response",
+        "wasted_ms": 626
+      }
+    ],
+    "slowest_mcp_connect": [
+      {
+        "server": "excalidraw",
+        "ms": 561,
+        "tools": 5,
+        "calls": 0
+      },
+      {
+        "server": "filesystem",
+        "ms": 555,
+        "tools": 14,
+        "calls": 0
+      },
+      {
+        "server": "everything",
+        "ms": 546,
+        "tools": 13,
+        "calls": 0
+      },
+      {
+        "server": "runpod",
+        "ms": 530,
+        "tools": 54,
+        "calls": 0
+      },
+      {
+        "server": "memory",
+        "ms": 519,
+        "tools": 9,
+        "calls": 0
+      },
+      {
+        "server": "sequential-thinking",
+        "ms": 484,
+        "tools": 1,
+        "calls": 0
+      }
+    ],
+    "mcp_servers": {
+      "sequential-thinking": {
+        "transport": "stdio",
+        "tool_count": 1,
+        "connect_ms": 484,
+        "calls": 0
+      },
+      "memory": {
+        "transport": "stdio",
+        "tool_count": 9,
+        "connect_ms": 519,
+        "calls": 0
+      },
+      "runpod": {
+        "transport": "stdio",
+        "tool_count": 54,
+        "connect_ms": 530,
+        "calls": 0
+      },
+      "everything": {
+        "transport": "stdio",
+        "tool_count": 13,
+        "connect_ms": 546,
+        "calls": 0
+      },
+      "filesystem": {
+        "transport": "stdio",
+        "tool_count": 14,
+        "connect_ms": 555,
+        "calls": 0
+      },
+      "excalidraw": {
+        "transport": "http",
+        "tool_count": 5,
+        "connect_ms": 561,
+        "calls": 0
+      }
+    },
+    "subagents": [],
+    "tools_used": {
+      "run_terminal_command": 1
+    },
+    "warnings": []
+  },
+  "result": {
+    "session_verdict": "significant_waste",
+    "recommendations": [
+      {
+        "type": "tool_output_truncate",
+        "target": "run_terminal_command",
+        "action": "Cap or summarize large shell results before they enter context; for Cargo.toml, emit only the [workspace] members block instead of the full command dump.",
+        "evidence": "largest_results: run_terminal_command bytes=16241 (span call-3bd369ce-cdf7-42de-9a8a-3cb5d0ca7c94-0); tool_result_tokens_est=4060; tool_calls=1",
+        "confidence": "high"
+      },
+      {
+        "type": "mcp_fix_broken",
+        "target": "time, fetch, git",
+        "action": "Fix or disable the three MCP servers that fail handshake on every startup so they stop burning startup time with no tools delivered.",
+        "evidence": "failed_mcp_servers: time handshake_failed wasted_ms=509; fetch handshake_failed wasted_ms=601; git handshake_failed wasted_ms=626; mcp_startup_ms=3195; wall_ms=11162",
+        "confidence": "high"
+      },
+      {
+        "type": "mcp_remove",
+        "target": "sequential-thinking, memory, runpod, everything, filesystem, excalidraw",
+        "action": "Disconnect idle MCP servers that connect every session but are never called for this workload.",
+        "evidence": "idle_mcp_servers (all calls=0): sequential-thinking tools_exposed=1 connect_ms=484; memory tools_exposed=9 connect_ms=519; runpod tools_exposed=54 connect_ms=530; everything tools_exposed=13 connect_ms=546; filesystem tools_exposed=14 connect_ms=555; excalidraw tools_exposed=5 connect_ms=561; mcp_calls=0; mcp_startup_ms=3195",
+        "confidence": "high"
+      },
+      {
+        "type": "skill_remove",
+        "target": "algorithmic-art, brand-guidelines, db-migrate, ios-app-release, k8s-deploy, refactoring-patterns, release-notes, requesting-code-review, security-review, slack-gif-creator, test-driven-development, using-git-worktrees, writing-plans",
+        "action": "Uninstall or stop installing skills that appear in installed_skills_never_loaded so they are not part of the default corpus.",
+        "evidence": "installed_skills_never_loaded tokens_est: algorithmic-art 674, brand-guidelines 401, db-migrate 429, ios-app-release 777, k8s-deploy 495, refactoring-patterns 1505, release-notes 441, requesting-code-review 426, security-review 2335, slack-gif-creator 477, test-driven-development 454, using-git-worktrees 567, writing-plans 1430; skill_loads=0; skill_tokens_est=0",
+        "confidence": "high"
+      }
+    ]
+  },
+  "meta": {
+    "cost_usd": 0.0544684,
+    "usage": {
+      "input_tokens": 18644,
+      "cache_read_input_tokens": 128,
+      "cache_creation_input_tokens": 0,
+      "output_tokens": 2857,
+      "reasoning_tokens": 2135,
+      "total_tokens": 21629
+    }
+  },
+  "ground_truth": {
+    "scenario": "big_output",
+    "expects": {
+      "verdict": "truncate_tool_output",
+      "note": "large terminal result pulled wholesale into context"
+    },
+    "cost_usd": 0.0534856,
+    "turns": 2
+  }
+}

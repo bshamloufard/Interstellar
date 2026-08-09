@@ -1,0 +1,526 @@
+{
+  "trace_file": "real_skill_bloat_019fe41d.json",
+  "digest": {
+    "session": {
+      "id": "019fe41d-5f31-7bc2-a948-9718f60269aa",
+      "title": "Code Review Skill Applied to app.py",
+      "model": "grok-4.5",
+      "wall_ms": 48456
+    },
+    "counts": {
+      "turns": 1,
+      "tool_calls": 6,
+      "skill_loads": 1,
+      "subagent_spawns": 0,
+      "mcp_calls": 0
+    },
+    "timing": {
+      "note": "all durations below are duration_source=measured",
+      "total_tool_ms": 211,
+      "permission_wait_ms": 0,
+      "mcp_startup_ms": 3518,
+      "slowest_measured": [
+        {
+          "tool": "run_terminal_command",
+          "ms": 110,
+          "kind": "tool",
+          "span": "call-9e32c961-002c-40d4-b9b6-66578088993d-1"
+        },
+        {
+          "tool": "run_terminal_command",
+          "ms": 84,
+          "kind": "tool",
+          "span": "call-fba65621-9e7f-4359-b6a6-8470ea5fca66-5"
+        },
+        {
+          "tool": "read_file",
+          "ms": 8,
+          "kind": "skill",
+          "span": "call-9e32c961-002c-40d4-b9b6-66578088993d-0"
+        },
+        {
+          "tool": "list_dir",
+          "ms": 3,
+          "kind": "tool",
+          "span": "call-fba65621-9e7f-4359-b6a6-8470ea5fca66-4"
+        },
+        {
+          "tool": "read_file",
+          "ms": 3,
+          "kind": "tool",
+          "span": "call-fba65621-9e7f-4359-b6a6-8470ea5fca66-2"
+        },
+        {
+          "tool": "read_file",
+          "ms": 3,
+          "kind": "tool",
+          "span": "call-fba65621-9e7f-4359-b6a6-8470ea5fca66-3"
+        }
+      ]
+    },
+    "context_cost": {
+      "tool_result_tokens_est": 2787,
+      "skill_tokens_est": 2527,
+      "skill_wasted_tokens_est": 294,
+      "largest_results": [
+        {
+          "tool": "read_file",
+          "bytes": 10154,
+          "span": "call-9e32c961-002c-40d4-b9b6-66578088993d-0"
+        },
+        {
+          "tool": "run_terminal_command",
+          "bytes": 463,
+          "span": "call-9e32c961-002c-40d4-b9b6-66578088993d-1"
+        },
+        {
+          "tool": "read_file",
+          "bytes": 270,
+          "span": "call-fba65621-9e7f-4359-b6a6-8470ea5fca66-2"
+        },
+        {
+          "tool": "list_dir",
+          "bytes": 159,
+          "span": "call-fba65621-9e7f-4359-b6a6-8470ea5fca66-4"
+        },
+        {
+          "tool": "read_file",
+          "bytes": 57,
+          "span": "call-fba65621-9e7f-4359-b6a6-8470ea5fca66-3"
+        }
+      ]
+    },
+    "skills_loaded": [
+      {
+        "skill": "code-review",
+        "tokens_est": 2527,
+        "lines": 210,
+        "unreferenced_tokens_est": 294,
+        "unreferenced_line_ranges": [
+          [
+            9,
+            16
+          ],
+          [
+            53,
+            68
+          ]
+        ],
+        "repeated_sections": 0,
+        "repeated_line_ranges": [],
+        "sections": [
+          {
+            "section": "(preamble)",
+            "start_line": 1,
+            "end_line": 8,
+            "tokens_est": 73,
+            "referenced": true
+          },
+          {
+            "section": "Core Prompt",
+            "start_line": 9,
+            "end_line": 16,
+            "tokens_est": 100,
+            "referenced": false
+          },
+          {
+            "section": "Be Ambitious About Structural Simplification",
+            "start_line": 17,
+            "end_line": 25,
+            "tokens_est": 121,
+            "referenced": true
+          },
+          {
+            "section": "Giant Files and Giant Functions",
+            "start_line": 26,
+            "end_line": 33,
+            "tokens_est": 90,
+            "referenced": true
+          },
+          {
+            "section": "Spaghetti Conditions",
+            "start_line": 34,
+            "end_line": 40,
+            "tokens_est": 81,
+            "referenced": true
+          },
+          {
+            "section": "Abstraction Quality",
+            "start_line": 41,
+            "end_line": 52,
+            "tokens_est": 106,
+            "referenced": true
+          },
+          {
+            "section": "Naming",
+            "start_line": 53,
+            "end_line": 68,
+            "tokens_est": 194,
+            "referenced": false
+          },
+          {
+            "section": "Comments and Docstrings",
+            "start_line": 69,
+            "end_line": 80,
+            "tokens_est": 146,
+            "referenced": true
+          },
+          {
+            "section": "Error Handling",
+            "start_line": 81,
+            "end_line": 91,
+            "tokens_est": 151,
+            "referenced": true
+          },
+          {
+            "section": "Concurrency and Resource Lifetime",
+            "start_line": 92,
+            "end_line": 105,
+            "tokens_est": 176,
+            "referenced": true
+          },
+          {
+            "section": "Tests in the Diff",
+            "start_line": 106,
+            "end_line": 117,
+            "tokens_est": 155,
+            "referenced": true
+          },
+          {
+            "section": "Performance Sanity Check",
+            "start_line": 118,
+            "end_line": 127,
+            "tokens_est": 97,
+            "referenced": true
+          },
+          {
+            "section": "Reporting Format",
+            "start_line": 128,
+            "end_line": 134,
+            "tokens_est": 82,
+            "referenced": true
+          },
+          {
+            "section": "Historical Notes on This Document",
+            "start_line": 135,
+            "end_line": 152,
+            "tokens_est": 268,
+            "referenced": true
+          },
+          {
+            "section": "Philosophy of Code Quality",
+            "start_line": 153,
+            "end_line": 180,
+            "tokens_est": 397,
+            "referenced": true
+          },
+          {
+            "section": "Glossary",
+            "start_line": 181,
+            "end_line": 201,
+            "tokens_est": 199,
+            "referenced": true
+          },
+          {
+            "section": "Further Reading",
+            "start_line": 202,
+            "end_line": 207,
+            "tokens_est": 73,
+            "referenced": true
+          }
+        ]
+      }
+    ],
+    "installed_skills_never_loaded": [
+      {
+        "skill": "algorithmic-art",
+        "bytes": 2697,
+        "tokens_est": 674
+      },
+      {
+        "skill": "brand-guidelines",
+        "bytes": 1606,
+        "tokens_est": 401
+      },
+      {
+        "skill": "db-migrate",
+        "bytes": 1718,
+        "tokens_est": 429
+      },
+      {
+        "skill": "ios-app-release",
+        "bytes": 3109,
+        "tokens_est": 777
+      },
+      {
+        "skill": "k8s-deploy",
+        "bytes": 1980,
+        "tokens_est": 495
+      },
+      {
+        "skill": "refactoring-patterns",
+        "bytes": 6023,
+        "tokens_est": 1505
+      },
+      {
+        "skill": "release-notes",
+        "bytes": 1766,
+        "tokens_est": 441
+      },
+      {
+        "skill": "requesting-code-review",
+        "bytes": 1705,
+        "tokens_est": 426
+      },
+      {
+        "skill": "security-review",
+        "bytes": 9343,
+        "tokens_est": 2335
+      },
+      {
+        "skill": "slack-gif-creator",
+        "bytes": 1908,
+        "tokens_est": 477
+      },
+      {
+        "skill": "test-driven-development",
+        "bytes": 1816,
+        "tokens_est": 454
+      },
+      {
+        "skill": "using-git-worktrees",
+        "bytes": 2271,
+        "tokens_est": 567
+      },
+      {
+        "skill": "writing-plans",
+        "bytes": 5720,
+        "tokens_est": 1430
+      }
+    ],
+    "discovery_after_skill_load": [
+      {
+        "skill": "code-review",
+        "discovery_calls": [
+          {
+            "tool": "list_dir",
+            "ms": 3,
+            "args": "{\"target_directory\": \"/Users/sentorcc/Interstellar/synth/workspace\"}"
+          }
+        ],
+        "count": 1,
+        "total_ms": 3
+      }
+    ],
+    "duplicate_calls": [],
+    "idle_mcp_servers": [
+      {
+        "server": "excalidraw",
+        "tools_exposed": 5,
+        "connect_ms": 388
+      },
+      {
+        "server": "sequential-thinking",
+        "tools_exposed": 1,
+        "connect_ms": 590
+      },
+      {
+        "server": "filesystem",
+        "tools_exposed": 14,
+        "connect_ms": 603
+      },
+      {
+        "server": "everything",
+        "tools_exposed": 13,
+        "connect_ms": 635
+      },
+      {
+        "server": "memory",
+        "tools_exposed": 9,
+        "connect_ms": 639
+      },
+      {
+        "server": "runpod",
+        "tools_exposed": 54,
+        "connect_ms": 663
+      }
+    ],
+    "failed_mcp_servers": [
+      {
+        "server": "time",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'time' handshake failed: connection closed: initialize response",
+        "wasted_ms": 750
+      },
+      {
+        "server": "fetch",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'fetch' handshake failed: connection closed: initialize response",
+        "wasted_ms": 825
+      },
+      {
+        "server": "git",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'git' handshake failed: connection closed: initialize response",
+        "wasted_ms": 861
+      }
+    ],
+    "slowest_mcp_connect": [
+      {
+        "server": "runpod",
+        "ms": 663,
+        "tools": 54,
+        "calls": 0
+      },
+      {
+        "server": "memory",
+        "ms": 639,
+        "tools": 9,
+        "calls": 0
+      },
+      {
+        "server": "everything",
+        "ms": 635,
+        "tools": 13,
+        "calls": 0
+      },
+      {
+        "server": "filesystem",
+        "ms": 603,
+        "tools": 14,
+        "calls": 0
+      },
+      {
+        "server": "sequential-thinking",
+        "ms": 590,
+        "tools": 1,
+        "calls": 0
+      },
+      {
+        "server": "excalidraw",
+        "ms": 388,
+        "tools": 5,
+        "calls": 0
+      }
+    ],
+    "mcp_servers": {
+      "excalidraw": {
+        "transport": "http",
+        "tool_count": 5,
+        "connect_ms": 388,
+        "calls": 0
+      },
+      "sequential-thinking": {
+        "transport": "stdio",
+        "tool_count": 1,
+        "connect_ms": 590,
+        "calls": 0
+      },
+      "filesystem": {
+        "transport": "stdio",
+        "tool_count": 14,
+        "connect_ms": 603,
+        "calls": 0
+      },
+      "everything": {
+        "transport": "stdio",
+        "tool_count": 13,
+        "connect_ms": 635,
+        "calls": 0
+      },
+      "memory": {
+        "transport": "stdio",
+        "tool_count": 9,
+        "connect_ms": 639,
+        "calls": 0
+      },
+      "runpod": {
+        "transport": "stdio",
+        "tool_count": 54,
+        "connect_ms": 663,
+        "calls": 0
+      }
+    },
+    "subagents": [],
+    "tools_used": {
+      "read_file": 3,
+      "run_terminal_command": 2,
+      "list_dir": 1
+    },
+    "warnings": [
+      "1 native skill_activated event(s); skill spans are read, not derived"
+    ]
+  },
+  "result": {
+    "session_verdict": "minor_waste",
+    "recommendations": [
+      {
+        "type": "skill_truncate",
+        "target": "code-review",
+        "action": "Trim or relocate the unreferenced Core Prompt and Naming sections so a short single-file review does not pay for unused guidance.",
+        "evidence": "unreferenced_tokens_est=294 (of skill_tokens_est=2527); unreferenced_line_ranges=[[9,16],[53,68]] with section tokens_est 100+194; skill_wasted_tokens_est=294; session turns=1",
+        "line_ranges": [
+          [
+            9,
+            16
+          ],
+          [
+            53,
+            68
+          ]
+        ],
+        "tokens_saved_est": 294,
+        "confidence": "medium"
+      },
+      {
+        "type": "skill_add_lines",
+        "target": "code-review",
+        "action": "Add an explicit line telling the agent how to resolve the review target path (e.g. prefer the path named in the user request; only list the workspace if no path is given).",
+        "evidence": "discovery_after_skill_load for code-review: count=1, total_ms=3 (list_dir on workspace after skill load)",
+        "confidence": "low"
+      },
+      {
+        "type": "mcp_fix_broken",
+        "target": "time,fetch,git",
+        "action": "Fix or disable the three MCP servers that fail handshake on every session startup.",
+        "evidence": "failed_mcp_servers: time handshake_failed wasted_ms=750; fetch handshake_failed wasted_ms=825; git handshake_failed wasted_ms=861; mcp_startup_ms=3518",
+        "confidence": "high"
+      },
+      {
+        "type": "mcp_remove",
+        "target": "excalidraw,sequential-thinking,filesystem,everything,memory,runpod",
+        "action": "Disconnect idle MCP servers that exposed tools but were never called in this session.",
+        "evidence": "mcp_calls=0; idle servers tools_exposed+connect_ms: excalidraw 5/388ms, sequential-thinking 1/590ms, filesystem 14/603ms, everything 13/635ms, memory 9/639ms, runpod 54/663ms",
+        "confidence": "high"
+      },
+      {
+        "type": "skill_remove",
+        "target": "algorithmic-art,brand-guidelines,db-migrate,ios-app-release,k8s-deploy,refactoring-patterns,release-notes,requesting-code-review,security-review,slack-gif-creator,test-driven-development,using-git-worktrees,writing-plans",
+        "action": "Uninstall or hide never-loaded installed skills so they stop bloating the skill catalog for unrelated sessions.",
+        "evidence": "installed_skills_never_loaded tokens_est: algorithmic-art 674, brand-guidelines 401, db-migrate 429, ios-app-release 777, k8s-deploy 495, refactoring-patterns 1505, release-notes 441, requesting-code-review 426, security-review 2335, slack-gif-creator 477, test-driven-development 454, using-git-worktrees 567, writing-plans 1430",
+        "confidence": "high"
+      }
+    ]
+  },
+  "meta": {
+    "cost_usd": 0.0273536,
+    "usage": {
+      "input_tokens": 3838,
+      "cache_read_input_tokens": 16512,
+      "cache_creation_input_tokens": 0,
+      "output_tokens": 2454,
+      "reasoning_tokens": 1672,
+      "total_tokens": 22804
+    }
+  },
+  "ground_truth": {
+    "scenario": "real_skill_bloat",
+    "expects": {
+      "skill": "code-review",
+      "verdict": "truncate",
+      "note": "211-line real skill; history/philosophy sections never drive behaviour"
+    },
+    "cost_usd": 0.0664768,
+    "turns": 3
+  }
+}

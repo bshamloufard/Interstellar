@@ -78,13 +78,27 @@ class SkillTruncateTests(unittest.TestCase):
         self.assertIsNotNone(p["skipped_reason"])
         self.assertIn("no line_ranges", p["skipped_reason"])
 
-    def test_out_of_range_is_skipped(self):
+    def test_sole_out_of_range_range_skips_the_whole_patch(self):
         version = _version(skills=[_skill("strict-audit", n_lines=20)])
         rec = _rec(type="skill_truncate", target="strict-audit",
                     line_ranges=[[15, 25]])
         out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
-        self.assertIsNotNone(out[0]["skipped_reason"])
-        self.assertIn("out of bounds", out[0]["skipped_reason"])
+        p = out[0]
+        self.assertIsNotNone(p["skipped_reason"])
+        self.assertIn("all cited line_ranges were invalid", p["skipped_reason"])
+        self.assertIn("exceeds skill length", p["skipped_reason"])
+
+    def test_out_of_range_range_dropped_individually_others_survive(self):
+        # One bad range alongside a good one: the patch stays alive using
+        # only the valid range, and the drop is noted, not the whole patch.
+        version = _version(skills=[_skill("strict-audit", n_lines=20)])
+        rec = _rec(type="skill_truncate", target="strict-audit",
+                    line_ranges=[[3, 5], [15, 25]])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        p = out[0]
+        self.assertIsNone(p["skipped_reason"])
+        self.assertEqual(p["line_ranges"], [[3, 5]])
+        self.assertIn("exceeds skill length", p["rationale"])
 
     def test_over_60_lines_is_rejected(self):
         version = _version(skills=[_skill("strict-audit", n_lines=200)])
@@ -103,6 +117,122 @@ class SkillTruncateTests(unittest.TestCase):
                     line_ranges=[[1, 60]])
         out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
         self.assertIsNone(out[0]["skipped_reason"])
+
+    def test_adjacent_ranges_are_coalesced(self):
+        version = _version(skills=[_skill("strict-audit", n_lines=100)])
+        rec = _rec(type="skill_truncate", target="strict-audit",
+                    line_ranges=[[39, 45], [46, 51]])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertEqual(out[0]["line_ranges"], [[39, 51]])
+
+    def test_overlapping_ranges_are_coalesced(self):
+        version = _version(skills=[_skill("strict-audit", n_lines=100)])
+        rec = _rec(type="skill_truncate", target="strict-audit",
+                    line_ranges=[[10, 20], [15, 25]])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertEqual(out[0]["line_ranges"], [[10, 25]])
+
+    def test_unrelated_ranges_are_not_merged(self):
+        version = _version(skills=[_skill("strict-audit", n_lines=100)])
+        rec = _rec(type="skill_truncate", target="strict-audit",
+                    line_ranges=[[10, 20], [30, 40]])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertEqual(out[0]["line_ranges"], [[10, 20], [30, 40]])
+
+    def test_coalescing_does_not_change_total_touched_lines(self):
+        # Out of order and with an overlap, but the underlying deleted line
+        # set is identical before and after coalescing.
+        version = _version(skills=[_skill("strict-audit", n_lines=100)])
+        rec = _rec(type="skill_truncate", target="strict-audit",
+                    line_ranges=[[46, 51], [39, 45], [10, 12]])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        p = out[0]
+        self.assertEqual(p["line_ranges"], [[10, 12], [39, 51]])
+        self.assertIsNone(p["skipped_reason"])
+
+    def test_real_skill_bloat_recommendation_coalesces_to_60_lines_and_is_not_rejected(self):
+        # analyzer/results/skill_bloat_019fe41b.result.json, verbatim.
+        version = _version(skills=[_skill("strict-audit", n_lines=125)])
+        rec = _rec(
+            type="skill_truncate", target="strict-audit",
+            line_ranges=[[25, 32], [39, 45], [46, 51], [61, 67], [75, 81],
+                         [82, 86], [96, 103], [111, 117], [118, 122]],
+            tokens_saved_est=728)
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        p = out[0]
+        self.assertIsNone(p["skipped_reason"])
+        self.assertEqual(p["line_ranges"],
+                          [[25, 32], [39, 51], [61, 67], [75, 86], [96, 103], [111, 122]])
+        touched = sum(b - a + 1 for a, b in p["line_ranges"])
+        self.assertEqual(touched, 60)
+
+
+class OrphanCheckTests(unittest.TestCase):
+    def _skill_with_content(self, name, content):
+        return make_skill(name, path=f"/home/skills/{name}/SKILL.md", content=content)
+
+    def test_clean_whole_section_deletion_has_no_orphans(self):
+        content = "\n".join([
+            "# Title",
+            "## Section A",
+            "body a1",
+            "body a2",
+            "## Section B",
+            "body b1",
+            "## Section C",
+            "body c1",
+        ])
+        # Delete all of section B (heading + body) as one clean unit.
+        self.assertEqual(patches._count_orphans(content, [[5, 6]]), 0)
+
+    def test_heading_with_body_deleted_leaves_dangling_heading(self):
+        content = "\n".join([
+            "# Title",
+            "## Section A",
+            "body a1",
+            "## Section B",
+            "body b1",
+            "## Section C",
+            "body c1",
+        ])
+        # Delete only Section B's body (line 5), leaving its heading dangling
+        # right before Section C's heading.
+        self.assertEqual(patches._count_orphans(content, [[5, 5]]), 1)
+
+    def test_heading_deleted_leaves_orphaned_body(self):
+        content = "\n".join([
+            "# Title",
+            "## Section A",
+            "body a1",
+            "## Section B",
+            "body b1",
+        ])
+        # Delete only Section B's heading (line 4); its body (line 5) is now
+        # a stray paragraph with no owning heading.
+        self.assertEqual(patches._count_orphans(content, [[4, 4]]), 1)
+
+    def test_no_headings_at_all_never_reports_orphans(self):
+        content = "\n".join(f"plain line {i}" for i in range(1, 21))
+        self.assertEqual(patches._count_orphans(content, [[5, 8], [15, 15]]), 0)
+
+    def test_orphan_count_surfaces_in_rationale_without_rejecting_the_patch(self):
+        content = "\n".join([
+            "# Title",
+            "## Section A",
+            "body a1",
+            "## Section B",
+            "body b1",
+            "## Section C",
+            "body c1",
+        ])
+        version = _version(skills=[self._skill_with_content("audit-skill", content)])
+        rec = _rec(type="skill_truncate", target="audit-skill", line_ranges=[[5, 5]])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        p = out[0]
+        self.assertIsNone(p["skipped_reason"])  # measurement only, never rejects
+        self.assertEqual(p["line_ranges"], [[5, 5]])
+        self.assertIn("leaves 1 orphaned fragment from partial section deletion",
+                       p["rationale"])
 
 
 class SkillRemoveTests(unittest.TestCase):

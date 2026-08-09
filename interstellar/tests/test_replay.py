@@ -10,6 +10,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -347,6 +348,32 @@ class RunMatrixTests(unittest.TestCase):
         # The matrix itself is always returned, never raised, regardless of
         # how many individual runs failed.
         self.assertIn("arms", matrix)
+
+    def test_dispatch_order_is_interleaved(self):
+        # A single worker dequeues submitted tasks strictly FIFO, so with
+        # max_parallel=1 the observed call order is exactly the submission
+        # order -- this is what must be interleaved, not arm-major.
+        order = []
+        lock = threading.Lock()
+
+        def fake_runner(argv, **kwargs):
+            home = kwargs["env"]["GROK_HOME"]
+            tag = Path(home).name.removesuffix("-home")  # "control-0" etc.
+            with lock:
+                order.append(tag)
+            return _ok_result(argv)
+
+        run_matrix(
+            "prompt", control=self.control_home, treatment=self.treatment_home,
+            k=3, workspace=self.workspace, scratch=self.scratch,
+            max_parallel=1, runner=fake_runner,
+        )
+
+        self.assertEqual(order, [
+            "control-0", "treatment-0",
+            "control-1", "treatment-1",
+            "control-2", "treatment-2",
+        ])
 
     def test_each_repeat_gets_its_own_home_and_workdir(self):
         seen_homes, seen_cwds = set(), set()

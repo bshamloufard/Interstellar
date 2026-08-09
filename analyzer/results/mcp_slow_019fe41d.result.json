@@ -1,0 +1,314 @@
+{
+  "trace_file": "mcp_slow_019fe41d.json",
+  "digest": {
+    "session": {
+      "id": "019fe41d-2a8f-7aa2-8c68-ddb4d62d980f",
+      "title": "List RunPod GPU Types Count",
+      "model": "grok-4.5",
+      "wall_ms": 11692
+    },
+    "counts": {
+      "turns": 1,
+      "tool_calls": 2,
+      "skill_loads": 0,
+      "subagent_spawns": 0,
+      "mcp_calls": 1
+    },
+    "timing": {
+      "note": "all durations below are duration_source=measured",
+      "total_tool_ms": 996,
+      "permission_wait_ms": 0,
+      "mcp_startup_ms": 2670,
+      "slowest_measured": [
+        {
+          "tool": "use_tool",
+          "ms": 986,
+          "kind": "mcp",
+          "span": "call-e14e80be-312a-481b-ba3f-c73d16ebf5d0-1"
+        },
+        {
+          "tool": "search_tool",
+          "ms": 10,
+          "kind": "tool",
+          "span": "call-282a3b5b-4902-4194-b10b-bf6d3d3ccba5-0"
+        }
+      ]
+    },
+    "context_cost": {
+      "tool_result_tokens_est": 11439,
+      "skill_tokens_est": 0,
+      "skill_wasted_tokens_est": 0,
+      "largest_results": [
+        {
+          "tool": "search_tool",
+          "bytes": 29027,
+          "span": "call-282a3b5b-4902-4194-b10b-bf6d3d3ccba5-0"
+        },
+        {
+          "tool": "use_tool",
+          "bytes": 16733,
+          "span": "call-e14e80be-312a-481b-ba3f-c73d16ebf5d0-1"
+        }
+      ]
+    },
+    "skills_loaded": [],
+    "installed_skills_never_loaded": [
+      {
+        "skill": "algorithmic-art",
+        "bytes": 2697,
+        "tokens_est": 674
+      },
+      {
+        "skill": "brand-guidelines",
+        "bytes": 1606,
+        "tokens_est": 401
+      },
+      {
+        "skill": "db-migrate",
+        "bytes": 1718,
+        "tokens_est": 429
+      },
+      {
+        "skill": "ios-app-release",
+        "bytes": 3109,
+        "tokens_est": 777
+      },
+      {
+        "skill": "k8s-deploy",
+        "bytes": 1980,
+        "tokens_est": 495
+      },
+      {
+        "skill": "refactoring-patterns",
+        "bytes": 6023,
+        "tokens_est": 1505
+      },
+      {
+        "skill": "release-notes",
+        "bytes": 1766,
+        "tokens_est": 441
+      },
+      {
+        "skill": "requesting-code-review",
+        "bytes": 1705,
+        "tokens_est": 426
+      },
+      {
+        "skill": "security-review",
+        "bytes": 9343,
+        "tokens_est": 2335
+      },
+      {
+        "skill": "slack-gif-creator",
+        "bytes": 1908,
+        "tokens_est": 477
+      },
+      {
+        "skill": "test-driven-development",
+        "bytes": 1816,
+        "tokens_est": 454
+      },
+      {
+        "skill": "using-git-worktrees",
+        "bytes": 2271,
+        "tokens_est": 567
+      },
+      {
+        "skill": "writing-plans",
+        "bytes": 5720,
+        "tokens_est": 1430
+      }
+    ],
+    "discovery_after_skill_load": [],
+    "duplicate_calls": [],
+    "idle_mcp_servers": [
+      {
+        "server": "memory",
+        "tools_exposed": 9,
+        "connect_ms": 411
+      },
+      {
+        "server": "filesystem",
+        "tools_exposed": 14,
+        "connect_ms": 412
+      },
+      {
+        "server": "sequential-thinking",
+        "tools_exposed": 1,
+        "connect_ms": 422
+      },
+      {
+        "server": "everything",
+        "tools_exposed": 13,
+        "connect_ms": 424
+      },
+      {
+        "server": "excalidraw",
+        "tools_exposed": 5,
+        "connect_ms": 582
+      }
+    ],
+    "failed_mcp_servers": [
+      {
+        "server": "time",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'time' handshake failed: connection closed: initialize response",
+        "wasted_ms": 523
+      },
+      {
+        "server": "git",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'git' handshake failed: connection closed: initialize response",
+        "wasted_ms": 565
+      },
+      {
+        "server": "fetch",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'fetch' handshake failed: connection closed: initialize response",
+        "wasted_ms": 579
+      }
+    ],
+    "slowest_mcp_connect": [
+      {
+        "server": "excalidraw",
+        "ms": 582,
+        "tools": 5,
+        "calls": 0
+      },
+      {
+        "server": "everything",
+        "ms": 424,
+        "tools": 13,
+        "calls": 0
+      },
+      {
+        "server": "sequential-thinking",
+        "ms": 422,
+        "tools": 1,
+        "calls": 0
+      },
+      {
+        "server": "runpod",
+        "ms": 419,
+        "tools": 54,
+        "calls": 1
+      },
+      {
+        "server": "filesystem",
+        "ms": 412,
+        "tools": 14,
+        "calls": 0
+      },
+      {
+        "server": "memory",
+        "ms": 411,
+        "tools": 9,
+        "calls": 0
+      }
+    ],
+    "mcp_servers": {
+      "memory": {
+        "transport": "stdio",
+        "tool_count": 9,
+        "connect_ms": 411,
+        "calls": 0
+      },
+      "filesystem": {
+        "transport": "stdio",
+        "tool_count": 14,
+        "connect_ms": 412,
+        "calls": 0
+      },
+      "runpod": {
+        "transport": "stdio",
+        "tool_count": 54,
+        "connect_ms": 419,
+        "calls": 1
+      },
+      "sequential-thinking": {
+        "transport": "stdio",
+        "tool_count": 1,
+        "connect_ms": 422,
+        "calls": 0
+      },
+      "everything": {
+        "transport": "stdio",
+        "tool_count": 13,
+        "connect_ms": 424,
+        "calls": 0
+      },
+      "excalidraw": {
+        "transport": "http",
+        "tool_count": 5,
+        "connect_ms": 582,
+        "calls": 0
+      }
+    },
+    "subagents": [],
+    "tools_used": {
+      "search_tool": 1,
+      "use_tool": 1
+    },
+    "warnings": []
+  },
+  "result": {
+    "session_verdict": "significant_waste",
+    "recommendations": [
+      {
+        "type": "tool_output_truncate",
+        "target": "search_tool",
+        "action": "Truncate or slim search_tool responses so schema discovery does not dump full tool catalogs into context.",
+        "evidence": "largest_results search_tool bytes=29027 (span call-282a3b5b-4902-4194-b10b-bf6d3d3ccba5-0); tool_result_tokens_est=11439; tools_used search_tool=1",
+        "confidence": "high"
+      },
+      {
+        "type": "tool_output_truncate",
+        "target": "use_tool",
+        "action": "Return compact MCP payloads for list/count operations instead of large full result bodies.",
+        "evidence": "largest_results use_tool bytes=16733 (span call-e14e80be-312a-481b-ba3f-c73d16ebf5d0-1); mcp_calls=1; use_tool measured ms=986",
+        "confidence": "high"
+      },
+      {
+        "type": "mcp_fix_broken",
+        "target": "time, git, fetch",
+        "action": "Fix or disable the failed MCP handshakes for time, git, and fetch so every session does not pay dead startup cost.",
+        "evidence": "failed_mcp_servers handshake_failed: time wasted_ms=523, git wasted_ms=565, fetch wasted_ms=579; mcp_startup_ms=2670; wall_ms=11692",
+        "confidence": "high"
+      },
+      {
+        "type": "mcp_remove",
+        "target": "memory, filesystem, sequential-thinking, everything, excalidraw",
+        "action": "Disconnect idle MCP servers not needed for RunPod-only sessions to cut connect overhead and exposed tool surface.",
+        "evidence": "idle_mcp_servers: memory tools_exposed=9 connect_ms=411; filesystem tools_exposed=14 connect_ms=412; sequential-thinking tools_exposed=1 connect_ms=422; everything tools_exposed=13 connect_ms=424; excalidraw tools_exposed=5 connect_ms=582; runpod calls=1 only; mcp_calls=1",
+        "confidence": "high"
+      },
+      {
+        "type": "skill_remove",
+        "target": "algorithmic-art, brand-guidelines, db-migrate, ios-app-release, k8s-deploy, refactoring-patterns, release-notes, requesting-code-review, security-review, slack-gif-creator, test-driven-development, using-git-worktrees, writing-plans",
+        "action": "Uninstall or stop auto-installing skills never loaded in the corpus so they do not inflate the skill inventory.",
+        "evidence": "installed_skills_never_loaded tokens_est: algorithmic-art=674, brand-guidelines=401, db-migrate=429, ios-app-release=777, k8s-deploy=495, refactoring-patterns=1505, release-notes=441, requesting-code-review=426, security-review=2335, slack-gif-creator=477, test-driven-development=454, using-git-worktrees=567, writing-plans=1430; skill_loads=0; skill_tokens_est=0",
+        "confidence": "high"
+      }
+    ]
+  },
+  "meta": {
+    "cost_usd": 0.0519204,
+    "usage": {
+      "input_tokens": 18723,
+      "cache_read_input_tokens": 128,
+      "cache_creation_input_tokens": 0,
+      "output_tokens": 2406,
+      "reasoning_tokens": 1603,
+      "total_tokens": 21257
+    }
+  },
+  "ground_truth": {
+    "scenario": "mcp_slow",
+    "expects": {
+      "verdict": "mcp_latency",
+      "note": "runpod is an npx stdio server; connect + call are slow"
+    },
+    "cost_usd": 0.0711352,
+    "turns": 3
+  }
+}

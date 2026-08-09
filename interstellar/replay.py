@@ -236,26 +236,20 @@ def run_matrix(prompt, *, control: Path, treatment: Path, k: int,
     from the same stretch of wall-clock time rather than two disjoint
     blocks.
 
-    `dispatch_order` (list of [arm, repeat] in actual submission order) and
-    a wall-clock start time per (arm, repeat) are computed here so the
-    report can state the interleaving happened rather than assert it, but
-    ReplayMatrix/RunResult have no field for them yet -- ask before adding
-    one. Returned as `matrix["dispatch_order"]` / `matrix["run_starts"]`
-    pending that contract change; see task-3 report for the request.
+    Recording `dispatch_order` and each run's start time was also asked for
+    (docs/plans/review-loop.md discussion), but there is nowhere on the
+    frozen ReplayMatrix/RunResult shapes to put them yet -- that needs a
+    contract change this function cannot make on its own, so for now the
+    interleaving itself is real (submission order below is the interleaved
+    order) but is not yet independently recorded on the return value.
     """
     scratch = Path(scratch)
     plan = []
     for i in range(k):
         plan.append((ARM_CONTROL, i, Path(control), control_extra_rules))
         plan.append((ARM_TREATMENT, i, Path(treatment), treatment_extra_rules))
-    dispatch_order = [(arm, repeat) for arm, repeat, _, _ in plan]
-
-    run_starts = {}
-    starts_lock = threading.Lock()
 
     def _task(arm, repeat, home_template, rules):
-        with starts_lock:
-            run_starts[(arm, repeat)] = time.time()
         tag = f"{arm}-{repeat}"
         try:
             home = _copy_home(home_template, scratch / f"{tag}-home")
@@ -280,15 +274,9 @@ def run_matrix(prompt, *, control: Path, treatment: Path, k: int,
             arm, repeat = futures[fut]
             arms[arm][repeat] = fut.result()
 
-    matrix = make_replay_matrix(
+    return make_replay_matrix(
         prompt=prompt, k=k, arms=arms,
         control_version_id=control_version_id,
         treatment_version_id=treatment_version_id,
         patch_id=patch_id,
     )
-    # Not part of the frozen ReplayMatrix shape -- see docstring above.
-    # Attached rather than dropped so the interleaving claim is checkable.
-    matrix["dispatch_order"] = [list(pair) for pair in dispatch_order]
-    matrix["run_starts"] = {f"{arm}:{repeat}": run_starts[(arm, repeat)]
-                            for arm, repeat in dispatch_order}
-    return matrix

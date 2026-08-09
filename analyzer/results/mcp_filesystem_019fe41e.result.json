@@ -1,0 +1,318 @@
+{
+  "trace_file": "mcp_filesystem_019fe41e.json",
+  "digest": {
+    "session": {
+      "id": "019fe41e-db4b-7da1-99ce-772cb10dea4e",
+      "title": "List Directory and Read utils.py via MCP",
+      "model": "grok-4.5",
+      "wall_ms": 9287
+    },
+    "counts": {
+      "turns": 1,
+      "tool_calls": 3,
+      "skill_loads": 0,
+      "subagent_spawns": 0,
+      "mcp_calls": 2
+    },
+    "timing": {
+      "note": "all durations below are duration_source=measured",
+      "total_tool_ms": 38,
+      "permission_wait_ms": 0,
+      "mcp_startup_ms": 3702,
+      "slowest_measured": [
+        {
+          "tool": "use_tool",
+          "ms": 14,
+          "kind": "mcp",
+          "span": "call-3e9022ed-2764-43d2-b11c-d9311c212d43-2"
+        },
+        {
+          "tool": "use_tool",
+          "ms": 13,
+          "kind": "mcp",
+          "span": "call-3e9022ed-2764-43d2-b11c-d9311c212d43-1"
+        },
+        {
+          "tool": "search_tool",
+          "ms": 11,
+          "kind": "tool",
+          "span": "call-f9f6214a-cc3b-4c7f-9848-f2acdbfdccb4-0"
+        }
+      ]
+    },
+    "context_cost": {
+      "tool_result_tokens_est": 3439,
+      "skill_tokens_est": 0,
+      "skill_wasted_tokens_est": 0,
+      "largest_results": [
+        {
+          "tool": "search_tool",
+          "bytes": 13631,
+          "span": "call-f9f6214a-cc3b-4c7f-9848-f2acdbfdccb4-0"
+        },
+        {
+          "tool": "use_tool",
+          "bytes": 78,
+          "span": "call-3e9022ed-2764-43d2-b11c-d9311c212d43-1"
+        },
+        {
+          "tool": "use_tool",
+          "bytes": 55,
+          "span": "call-3e9022ed-2764-43d2-b11c-d9311c212d43-2"
+        }
+      ]
+    },
+    "skills_loaded": [],
+    "installed_skills_never_loaded": [
+      {
+        "skill": "algorithmic-art",
+        "bytes": 2697,
+        "tokens_est": 674
+      },
+      {
+        "skill": "brand-guidelines",
+        "bytes": 1606,
+        "tokens_est": 401
+      },
+      {
+        "skill": "db-migrate",
+        "bytes": 1718,
+        "tokens_est": 429
+      },
+      {
+        "skill": "ios-app-release",
+        "bytes": 3109,
+        "tokens_est": 777
+      },
+      {
+        "skill": "k8s-deploy",
+        "bytes": 1980,
+        "tokens_est": 495
+      },
+      {
+        "skill": "refactoring-patterns",
+        "bytes": 6023,
+        "tokens_est": 1505
+      },
+      {
+        "skill": "release-notes",
+        "bytes": 1766,
+        "tokens_est": 441
+      },
+      {
+        "skill": "requesting-code-review",
+        "bytes": 1705,
+        "tokens_est": 426
+      },
+      {
+        "skill": "security-review",
+        "bytes": 9343,
+        "tokens_est": 2335
+      },
+      {
+        "skill": "slack-gif-creator",
+        "bytes": 1908,
+        "tokens_est": 477
+      },
+      {
+        "skill": "test-driven-development",
+        "bytes": 1816,
+        "tokens_est": 454
+      },
+      {
+        "skill": "using-git-worktrees",
+        "bytes": 2271,
+        "tokens_est": 567
+      },
+      {
+        "skill": "writing-plans",
+        "bytes": 5720,
+        "tokens_est": 1430
+      }
+    ],
+    "discovery_after_skill_load": [],
+    "duplicate_calls": [],
+    "idle_mcp_servers": [
+      {
+        "server": "excalidraw",
+        "tools_exposed": 5,
+        "connect_ms": 443
+      },
+      {
+        "server": "memory",
+        "tools_exposed": 9,
+        "connect_ms": 624
+      },
+      {
+        "server": "sequential-thinking",
+        "tools_exposed": 1,
+        "connect_ms": 625
+      },
+      {
+        "server": "everything",
+        "tools_exposed": 13,
+        "connect_ms": 645
+      },
+      {
+        "server": "runpod",
+        "tools_exposed": 54,
+        "connect_ms": 702
+      }
+    ],
+    "failed_mcp_servers": [
+      {
+        "server": "time",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'time' handshake failed: connection closed: initialize response",
+        "wasted_ms": 912
+      },
+      {
+        "server": "git",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'git' handshake failed: connection closed: initialize response",
+        "wasted_ms": 939
+      },
+      {
+        "server": "fetch",
+        "error_type": "handshake_failed",
+        "error": "MCP server 'fetch' handshake failed: connection closed: initialize response",
+        "wasted_ms": 975
+      }
+    ],
+    "slowest_mcp_connect": [
+      {
+        "server": "runpod",
+        "ms": 702,
+        "tools": 54,
+        "calls": 0
+      },
+      {
+        "server": "filesystem",
+        "ms": 663,
+        "tools": 14,
+        "calls": 2
+      },
+      {
+        "server": "everything",
+        "ms": 645,
+        "tools": 13,
+        "calls": 0
+      },
+      {
+        "server": "sequential-thinking",
+        "ms": 625,
+        "tools": 1,
+        "calls": 0
+      },
+      {
+        "server": "memory",
+        "ms": 624,
+        "tools": 9,
+        "calls": 0
+      },
+      {
+        "server": "excalidraw",
+        "ms": 443,
+        "tools": 5,
+        "calls": 0
+      }
+    ],
+    "mcp_servers": {
+      "excalidraw": {
+        "transport": "http",
+        "tool_count": 5,
+        "connect_ms": 443,
+        "calls": 0
+      },
+      "memory": {
+        "transport": "stdio",
+        "tool_count": 9,
+        "connect_ms": 624,
+        "calls": 0
+      },
+      "sequential-thinking": {
+        "transport": "stdio",
+        "tool_count": 1,
+        "connect_ms": 625,
+        "calls": 0
+      },
+      "everything": {
+        "transport": "stdio",
+        "tool_count": 13,
+        "connect_ms": 645,
+        "calls": 0
+      },
+      "filesystem": {
+        "transport": "stdio",
+        "tool_count": 14,
+        "connect_ms": 663,
+        "calls": 2
+      },
+      "runpod": {
+        "transport": "stdio",
+        "tool_count": 54,
+        "connect_ms": 702,
+        "calls": 0
+      }
+    },
+    "subagents": [],
+    "tools_used": {
+      "search_tool": 1,
+      "use_tool": 2
+    },
+    "warnings": []
+  },
+  "result": {
+    "session_verdict": "significant_waste",
+    "recommendations": [
+      {
+        "type": "tool_output_truncate",
+        "target": "search_tool",
+        "action": "Truncate or summarize search_tool responses so MCP schema dumps stop dominating context on small tasks.",
+        "evidence": "largest_results search_tool bytes=13631; tool_result_tokens_est=3439; total_tool_ms=38",
+        "confidence": "high"
+      },
+      {
+        "type": "mcp_fix_broken",
+        "target": "time, git, fetch",
+        "action": "Fix or disable these MCP servers so every session stops paying failed handshakes at startup.",
+        "evidence": "time handshake_failed wasted_ms=912; git handshake_failed wasted_ms=939; fetch handshake_failed wasted_ms=975; mcp_startup_ms=3702; wall_ms=9287",
+        "confidence": "high"
+      },
+      {
+        "type": "mcp_remove",
+        "target": "excalidraw, memory, sequential-thinking, everything, runpod",
+        "action": "Disconnect idle MCP servers that expose tools but received zero calls this session.",
+        "evidence": "excalidraw tools_exposed=5 connect_ms=443; memory tools_exposed=9 connect_ms=624; sequential-thinking tools_exposed=1 connect_ms=625; everything tools_exposed=13 connect_ms=645; runpod tools_exposed=54 connect_ms=702; mcp_startup_ms=3702; filesystem calls=2",
+        "confidence": "high"
+      },
+      {
+        "type": "skill_remove",
+        "target": "algorithmic-art, brand-guidelines, db-migrate, ios-app-release, k8s-deploy, refactoring-patterns, release-notes, requesting-code-review, security-review, slack-gif-creator, test-driven-development, using-git-worktrees, writing-plans",
+        "action": "Uninstall or stop advertising skills that no session loads so the catalog stops carrying dead weight.",
+        "evidence": "installed_skills_never_loaded includes security-review tokens_est=2335, refactoring-patterns tokens_est=1505, writing-plans tokens_est=1430, ios-app-release tokens_est=777, algorithmic-art tokens_est=674; skill_loads=0; skill_tokens_est=0",
+        "confidence": "high"
+      }
+    ]
+  },
+  "meta": {
+    "cost_usd": 0.0527024,
+    "usage": {
+      "input_tokens": 18841,
+      "cache_read_input_tokens": 128,
+      "cache_creation_input_tokens": 0,
+      "output_tokens": 2497,
+      "reasoning_tokens": 1917,
+      "total_tokens": 21466
+    }
+  },
+  "ground_truth": {
+    "scenario": "mcp_filesystem",
+    "expects": {
+      "verdict": "mcp_latency",
+      "note": "npx stdio server; multi-second connect for a task native tools already cover"
+    },
+    "cost_usd": 0.0520164,
+    "turns": 3
+  }
+}

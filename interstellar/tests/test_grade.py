@@ -7,11 +7,19 @@ import json
 import unittest
 from pathlib import Path
 
-from interstellar.grade import efficiency, grade_matrix, judge_pair, regressions
+from interstellar.grade import (
+    efficiency,
+    grade_matrix,
+    judge_consistency,
+    judge_pair,
+    regressions,
+)
 from interstellar.types import (
     ARM_CONTROL,
     ARM_TREATMENT,
     EFFICIENCY_METRICS,
+    make_grade,
+    make_judge_verdict,
     make_replay_matrix,
     make_run_result,
 )
@@ -253,6 +261,81 @@ class JudgePairTest(unittest.TestCase):
         verdict = judge_pair("do the thing", "a", "b", grok=lambda *a, **k: None)
         self.assertEqual(verdict["verdict"], "tie")
         self.assertFalse(verdict["consistent"])
+
+
+# --------------------------------------------------------------------------
+# judge_consistency()
+# --------------------------------------------------------------------------
+
+def _graded(judge):
+    """A minimal Grade carrying only the judge verdict judge_consistency()
+    reads -- the efficiency dicts don't matter for this function."""
+    return make_grade(
+        repeat=0, control_efficiency={}, treatment_efficiency={}, judge=judge,
+    )
+
+
+class JudgeConsistencyTest(unittest.TestCase):
+    def test_all_consistent_is_rate_one(self):
+        grades = [
+            _graded(make_judge_verdict(verdict=ARM_CONTROL, consistent=True))
+            for _ in range(6)
+        ]
+        result = judge_consistency(grades)
+        self.assertEqual(result["pairs"], 6)
+        self.assertEqual(result["agreed"], 6)
+        self.assertEqual(result["rate"], 1.0)
+        self.assertEqual(result["note"], "")
+
+    def test_mixed_consistency_computes_rate(self):
+        grades = [
+            _graded(make_judge_verdict(verdict=ARM_CONTROL, consistent=True)),
+            _graded(make_judge_verdict(verdict=ARM_TREATMENT, consistent=True)),
+            _graded(make_judge_verdict(verdict="tie", consistent=False)),
+            _graded(make_judge_verdict(verdict="tie", consistent=False)),
+            _graded(make_judge_verdict(verdict=ARM_CONTROL, consistent=True)),
+        ]
+        result = judge_consistency(grades)
+        self.assertEqual(result["pairs"], 5)
+        self.assertEqual(result["agreed"], 3)
+        self.assertAlmostEqual(result["rate"], 0.6)
+
+    def test_ungraded_pairs_are_excluded_not_counted_as_inconsistent(self):
+        grades = [
+            _graded(make_judge_verdict(verdict=ARM_CONTROL, consistent=True)),
+            _graded(None),  # no judge ran for this repeat (e.g. a failed run)
+            _graded(None),
+        ]
+        result = judge_consistency(grades)
+        self.assertEqual(result["pairs"], 1)
+        self.assertEqual(result["agreed"], 1)
+        self.assertEqual(result["rate"], 1.0)
+
+    def test_no_judged_pairs_is_rate_none_with_a_note(self):
+        result = judge_consistency([_graded(None), _graded(None)])
+        self.assertEqual(result["pairs"], 0)
+        self.assertEqual(result["agreed"], 0)
+        self.assertIsNone(result["rate"])
+        self.assertTrue(result["note"])
+
+    def test_small_sample_gets_an_unreliable_estimate_note(self):
+        grades = [_graded(make_judge_verdict(verdict=ARM_CONTROL, consistent=True))
+                  for _ in range(3)]
+        result = judge_consistency(grades)
+        self.assertEqual(result["pairs"], 3)
+        self.assertIn("unreliable", result["note"])
+
+    def test_five_or_more_pairs_gets_no_note(self):
+        grades = [_graded(make_judge_verdict(verdict=ARM_CONTROL, consistent=True))
+                  for _ in range(5)]
+        result = judge_consistency(grades)
+        self.assertEqual(result["pairs"], 5)
+        self.assertEqual(result["note"], "")
+
+    def test_empty_grades_list(self):
+        result = judge_consistency([])
+        self.assertEqual(result, {"pairs": 0, "agreed": 0, "rate": None,
+                                   "note": "no judged pairs -- consistency is undefined"})
 
 
 # --------------------------------------------------------------------------
