@@ -9,7 +9,7 @@ directory rather than creating a duplicate.
 
 ```bash
 cd ~/interstellar-demo/checkout
-GROK_HOME=~/.grok-interstellar-demo grok
+GROK_HOME=~/.grok-interstellar-demo grok-dev
 ```
 
 In the TUI: **`/resume`** — the session picker for past conversations on disk,

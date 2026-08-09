@@ -35,4 +35,4 @@ echo "== fabricating the before-session =="
 python3 "$HERE/build_session.py"
 
 echo "== done =="
-echo "Launch with:  GROK_HOME=$DEMO_HOME grok   (cwd: $REPO_DIR)"
+echo "Launch with:  GROK_HOME=$DEMO_HOME grok-dev   (cwd: $REPO_DIR)"
