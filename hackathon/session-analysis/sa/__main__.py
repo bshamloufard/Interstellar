@@ -13,6 +13,10 @@ def main(argv: list[str] | None = None) -> int:
             "  python -m sa normalize <session_dir> [-o package_dir]\n"
             "  python -m sa serve <package_dir> [--port 8765]\n"
             "  python -m sa viz <session_dir>   # normalize + serve\n"
+            "\n"
+            "  serve/viz also take --report-url URL [--report-session-id ID]\n"
+            "  to show a view-switcher link to the matching interstellar\n"
+            "  review report in the topbar.\n"
         )
         return 0
 
@@ -37,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
         session_dir = Path(rest[0])
         out = None
         port = 8765
+        report_url = None
+        report_session_id = None
         i = 1
         while i < len(rest):
             if rest[i] in ("-o", "--out") and i + 1 < len(rest):
@@ -45,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
             elif rest[i] == "--port" and i + 1 < len(rest):
                 port = int(rest[i + 1])
                 i += 2
+            elif rest[i] == "--report-url" and i + 1 < len(rest):
+                report_url = rest[i + 1]
+                i += 2
+            elif rest[i] == "--report-session-id" and i + 1 < len(rest):
+                report_session_id = rest[i + 1]
+                i += 2
             else:
                 i += 1
         summary = _read_json(session_dir / "summary.json") or {}
@@ -52,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         out = out or (Path(__file__).resolve().parent.parent / "packages" / str(sid))
         print(f"normalizing {session_dir} → {out}")
         normalize_session(session_dir, out)
-        serve(out, port=port)
+        serve(out, port=port, report_url=report_url, report_session_id=report_session_id)
         return 0
 
     print(f"unknown command: {cmd}", file=sys.stderr)

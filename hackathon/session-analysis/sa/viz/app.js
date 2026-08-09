@@ -243,12 +243,61 @@ function renderHeader(pkg) {
   const model = s.model_id || pkg.signals.models?.primary_model_id || "—";
 
   document.getElementById("header-meta").innerHTML = [
+    `<span class="pill">session <strong>${escapeHtml(s.session_id || s.id || "—")}</strong></span>`,
     `<span class="pill">model <strong>${escapeHtml(model)}</strong></span>`,
     `<span class="pill">turns <strong>${turns}</strong></span>`,
     `<span class="pill">tools <strong>${tools}</strong></span>`,
     `<span class="pill">skills <strong>${skills}</strong></span>`,
     `<span class="pill">wall <strong>${escapeHtml(fmtDur(dur))}</strong></span>`,
   ].join("");
+}
+
+function shortSessionId(id) {
+  return (id || "").split("-")[0] || id || "";
+}
+
+/** View switcher: a link to the matching interstellar review report for
+ * this same session, appended (not replacing) into #header-meta next to
+ * the pills above. Renders nothing when no report_url is configured (see
+ * serve.py's --report-url) -- a missing link is safe, a wrong one is not:
+ * this only ever LOWERS confidence (unverified) or LOUDLY flags a mismatch
+ * (never silently claims a match it can't back up). Never throws into
+ * main()'s caller -- a /meta.json fetch failure just means no switcher. */
+async function renderViewSwitcher(pkg) {
+  const container = document.getElementById("header-meta");
+  if (!container) return;
+  let meta;
+  try {
+    meta = await loadJSON("/meta.json");
+  } catch (err) {
+    return;
+  }
+  const url = meta && meta.report_url;
+  if (!url) return;
+
+  const sessionId = pkg.session.session_id || pkg.session.id || "";
+  const targetId = (meta.report_session_id || "").trim();
+  let cls = "view-link view-link-unverified";
+  let label = "Review";
+  let title = `Opens the review report at ${url} — target session could not be verified against this trace`;
+  if (targetId) {
+    if (targetId === sessionId) {
+      cls = "view-link";
+      title = `Opens the review report — verified same session (${escapeHtml(sessionId)})`;
+    } else {
+      cls = "view-link view-link-mismatch";
+      label = `Review · ${shortSessionId(targetId)}`;
+      title = `WARNING: this report is for a DIFFERENT session (${targetId}) than this trace (${sessionId})`;
+    }
+  }
+  container.insertAdjacentHTML(
+    "beforeend",
+    `<span class="view-switcher">` +
+      `<span class="view-seg view-seg-active">Trace</span>` +
+      `<a class="${cls}" href="${escapeHtml(url)}" target="_blank" rel="noopener" title="${escapeHtml(
+        title
+      )}">${escapeHtml(label)}</a></span>`
+  );
 }
 
 const SEV_RANK = { alert: 0, warn: 1, info: 2 };
@@ -1754,6 +1803,7 @@ async function main() {
     const pkg = await loadPackage();
     state.pkg = pkg;
     renderHeader(pkg);
+    renderViewSwitcher(pkg); // fire-and-forget: never blocks the rest of the page on /meta.json
     renderInsights(pkg);
 
     const { byId, roots } = buildTree(pkg.timeline || []);

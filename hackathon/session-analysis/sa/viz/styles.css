@@ -93,6 +93,45 @@ body {
 }
 .pill strong { color: var(--text); font-weight: 600; }
 
+/* View switcher: a link to the matching interstellar review report for
+ * this same session -- mirrors the switcher on that page (same tokens,
+ * same two-segment shape) so the control reads as native on both. Only
+ * appended (see app.js renderViewSwitcher) when a report_url is actually
+ * configured; a wrong-session link renders LOUD (mismatch, red), not
+ * hidden -- see that function's docstring.
+ */
+.view-switcher {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.view-seg, .view-link { padding: 0.2rem 0.55rem; white-space: nowrap; }
+.view-seg-active { color: var(--text); background: var(--accent-dim); font-weight: 600; }
+.view-link {
+  color: var(--muted);
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  text-decoration: none;
+}
+.view-link:hover { color: var(--accent); }
+.view-link-unverified {
+  color: var(--cancelled);
+  border-left-color: var(--cancelled);
+  background: rgba(251, 191, 36, 0.12); /* --cancelled, dimmed */
+}
+.view-link-unverified:hover { filter: brightness(1.15); }
+.view-link-mismatch {
+  color: var(--failure);
+  border-left-color: var(--failure);
+  background: rgba(248, 113, 113, 0.14); /* --failure, dimmed */
+  font-weight: 600;
+}
+.view-link-mismatch:hover { filter: brightness(1.15); }
+
 /* ── Insights strip ──────────────────────────────────── */
 .insights-strip {
   flex-shrink: 0;

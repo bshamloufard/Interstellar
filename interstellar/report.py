@@ -216,7 +216,7 @@ def _now_iso():
 
 def build(*, session, baseline_version, patch_results, dropped_patches=None,
           k=0, cost_usd=0.0, generated_at=None, extra_caveats=None,
-          rerun_args=None):
+          rerun_args=None, trace_viz_url=None, trace_viz_session_id=None):
     """Assemble the Report per types.make_report.
 
     `patch_results` must already be fully-formed make_patch_result() dicts
@@ -242,6 +242,24 @@ def build(*, session, baseline_version, patch_results, dropped_patches=None,
     deliberately NOT included here: it comes from the request, validated
     against ALLOWED_RERUN_K server-side, never trusted from stored config
     either -- see _RunManager.
+
+    `trace_viz_url`/`trace_viz_session_id` (both optional): the URL of
+    Alex's trace visualizer (sa.serve) for the SAME session, and the
+    session_id it actually serves. Stored under the report's own
+    "trace_viz" key (same precedent as "rerun" above) and rendered as a
+    view-switcher link in the topbar -- see _view_switcher_html. The hard
+    rule this module holds to: a missing/wrong link is worse than no link
+    at all, so:
+      - no `trace_viz_url` -> "trace_viz" is {} and nothing is rendered.
+      - `trace_viz_url` with a `trace_viz_session_id` that matches this
+        report's own session_id -> a normal, confident link.
+      - `trace_viz_url` with a `trace_viz_session_id` that does NOT match
+        -> still rendered (never silently swapped for nothing), but with
+        a loud mismatch warning and the target session id spelled out in
+        the label, so it is never mistaken for a same-session link.
+      - `trace_viz_url` with no `trace_viz_session_id` at all (match
+        can't be checked) -> rendered, visibly marked "unverified" rather
+        than presented as confirmed.
     """
     for pr in patch_results:
         if not pr.get("verdict_line"):
@@ -270,6 +288,16 @@ def build(*, session, baseline_version, patch_results, dropped_patches=None,
         "k_choices": list(ALLOWED_RERUN_K),
         "args": dict(rerun_args) if rerun_args else {},
     }
+    if trace_viz_url:
+        own_session_id = (session or {}).get("session_id") or ""
+        target_session_id = trace_viz_session_id or ""
+        rpt["trace_viz"] = {
+            "url": trace_viz_url,
+            "session_id": target_session_id,
+            "verified_match": bool(target_session_id) and target_session_id == own_session_id,
+        }
+    else:
+        rpt["trace_viz"] = {}
     return rpt
 
 
@@ -958,6 +986,52 @@ def _run_panel_html(rerun, *, current_k):
     </div>"""
 
 
+def _short_session_id(session_id):
+    """The first hyphen-segment of a session id (e.g. "019fe4e7" from
+    "019fe4e7-68a7-...") -- long enough to be recognizable, short enough
+    for a topbar label. Matches how these ids get abbreviated in practice
+    (session_id is a hyphenated UUIDv7)."""
+    return (session_id or "").split("-")[0] or session_id or ""
+
+
+def _view_switcher_html(trace_viz, own_session_id):
+    """The Review/Trace view switcher: a link to Alex's trace visualizer
+    (sa.serve) for this same session. Renders nothing when no URL is
+    configured -- see build()'s docstring for why a missing link is the
+    safe default and a wrong one is not. `trace_viz` is report["trace_viz"]
+    exactly as build() stamped it."""
+    url = (trace_viz or {}).get("url")
+    if not url:
+        return ""
+    target_id = (trace_viz or {}).get("session_id") or ""
+    verified = bool((trace_viz or {}).get("verified_match"))
+    if not target_id:
+        cls = "view-link view-link-unverified"
+        label = "Trace"
+        title = (
+            f"Opens {url} — target session could not be verified "
+            "against this report"
+        )
+    elif verified:
+        cls = "view-link"
+        label = "Trace"
+        title = f"Opens {url} — verified same session ({_esc(own_session_id)})"
+    else:
+        cls = "view-link view-link-mismatch"
+        label = f"Trace &middot; {_esc(_short_session_id(target_id))}"
+        title = (
+            f"WARNING: this trace is for a DIFFERENT session ({target_id}) "
+            f"than this report ({own_session_id})"
+        )
+    return (
+        '<div class="view-switcher" role="group" aria-label="View">'
+        '<span class="view-seg view-seg-active">Review</span>'
+        f'<a class="{cls}" href="{_esc(url)}" target="_blank" rel="noopener" '
+        f'title="{_esc(title)}">{label}</a>'
+        "</div>"
+    )
+
+
 def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=None):
     """The badge is the one thing a scanning reader actually reads, so it
     must never be able to say something that isn't true. Four checks run
@@ -1232,6 +1306,7 @@ def render_html(report) -> str:
         <span class="pill">k <strong>{_esc(k)}</strong></span>
         <span class="pill">cycle cost <strong>${cost:,.4f}</strong></span>
         <span class="pill">generated <strong>{_esc(generated_at or "—")}</strong></span>
+        {_view_switcher_html(report.get("trace_viz") or {}, session.get("session_id") or "")}
         {_run_panel_html(report.get("rerun") or {}, current_k=k)}
       </div>
     </header>
@@ -1423,6 +1498,40 @@ h1, h2, h3 { margin: 0; }
   white-space: nowrap;
 }
 .pill strong { color: var(--text); font-weight: 600; }
+
+/* View switcher: a link to Alex's trace visualizer (sa.serve) for this
+   same session -- two segments, "Review" (this page, always the active/
+   filled segment since you're on it) and "Trace" (the link). Renders only
+   when report["trace_viz"]["url"] is set (see _view_switcher_html) -- no
+   link is safer than a wrong one, so there is no placeholder/disabled
+   variant here the way the run panel has one. */
+.view-switcher {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.view-seg, .view-link { padding: 0.2rem 0.55rem; white-space: nowrap; }
+.view-seg-active { color: var(--text); background: var(--accent-dim); font-weight: 600; }
+.view-link {
+  color: var(--muted);
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  text-decoration: none;
+}
+.view-link:hover { color: var(--accent); }
+/* Session id could not be checked against this report's own id -- shown,
+   never hidden, but visibly not vouched for. */
+.view-link-unverified { color: var(--warn); border-left-color: var(--warn); background: var(--warn-dim); }
+.view-link-unverified:hover { color: var(--warn); filter: brightness(1.15); }
+/* Confirmed a DIFFERENT session -- the exact failure mode the brief calls
+   out as worse than no link at all if left silent. Loud on purpose: red,
+   and the label itself carries the mismatched session id. */
+.view-link-mismatch { color: var(--bad); border-left-color: var(--bad); background: var(--bad-dim); font-weight: 600; }
+.view-link-mismatch:hover { color: var(--bad); filter: brightness(1.15); }
 
 /* Task 2: the trigger button, in the topbar since it acts on the whole
    session (re-runs the whole cycle), not any one patch. */
@@ -1979,6 +2088,22 @@ def _build_rerun_argv(*, trace_file, out_dir, k, args):
     return argv
 
 
+def validate_run_k(body):
+    """Parse+validate a /run POST body. Returns (k, error_message): k is
+    None iff error_message is set. This is the ONLY thing ever read from
+    the request body -- see _RunManager.start for what deliberately does
+    NOT come from here. Shared by _ReportOnlyHandler.do_POST and
+    interstellar/combined_serve.py's handler so both enforce the exact
+    same rule from one place."""
+    k = body.get("k") if isinstance(body, dict) else None
+    # bool is an int subclass in Python -- explicitly excluded so
+    # {"k": true} can't sneak past `k in ALLOWED_RERUN_K` on some future
+    # allow-list that happened to include 1.
+    if not isinstance(k, int) or isinstance(k, bool) or k not in ALLOWED_RERUN_K:
+        return None, f"k must be one of {list(ALLOWED_RERUN_K)}"
+    return k, None
+
+
 class _RunManager:
     """Tracks at most one review-cycle subprocess for this server's out_dir.
     A cycle takes minutes and spends real API/model cost, so a second /run
@@ -2119,12 +2244,9 @@ class _ReportOnlyHandler(http.server.BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json(400, {"error": "invalid JSON body"})
             return
-        k = body.get("k") if isinstance(body, dict) else None
-        # bool is an int subclass in Python -- explicitly excluded so
-        # {"k": true} can't sneak past `k in ALLOWED_RERUN_K` on some
-        # future allow-list that happened to include 1.
-        if not isinstance(k, int) or isinstance(k, bool) or k not in ALLOWED_RERUN_K:
-            self._send_json(400, {"error": f"k must be one of {list(ALLOWED_RERUN_K)}"})
+        k, err = validate_run_k(body)
+        if err:
+            self._send_json(400, {"error": err})
             return
         ok, err = self._run_manager.start(k)
         if not ok:
@@ -2152,6 +2274,24 @@ class _LoopbackTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 
 
+def make_run_manager(out_dir, argv_builder=None):
+    """Build a _RunManager for out_dir, loaded from out_dir/report.json's
+    "rerun" key if present (empty config -- run button unavailable -- if
+    report.json is missing or unparseable). Split out of make_server() so
+    interstellar/combined_serve.py's combined dashboard can wire the exact
+    same /run + /status behavior onto its own routes instead of
+    reimplementing the "load rerun config, build the manager" step."""
+    out_dir = Path(out_dir).resolve()
+    rerun_config = {}
+    report_path = out_dir / "report.json"
+    if report_path.is_file():
+        try:
+            rerun_config = json.loads(report_path.read_text(encoding="utf-8")).get("rerun") or {}
+        except (json.JSONDecodeError, OSError):
+            rerun_config = {}
+    return _RunManager(out_dir, rerun_config, argv_builder=argv_builder)
+
+
 def make_server(out_dir, host="127.0.0.1", port=4242, argv_builder=None):
     """Build (but do not start) a loopback-only TCP server that serves only
     report.json and index.html from out_dir, plus /run and /status (see the
@@ -2163,14 +2303,7 @@ def make_server(out_dir, host="127.0.0.1", port=4242, argv_builder=None):
     out_dir = Path(out_dir).resolve()
     if not (out_dir / "index.html").is_file():
         raise SystemExit(f"error: {out_dir} has no index.html (call write() first)")
-    rerun_config = {}
-    report_path = out_dir / "report.json"
-    if report_path.is_file():
-        try:
-            rerun_config = json.loads(report_path.read_text(encoding="utf-8")).get("rerun") or {}
-        except (json.JSONDecodeError, OSError):
-            rerun_config = {}
-    run_manager = _RunManager(out_dir, rerun_config, argv_builder=argv_builder)
+    run_manager = make_run_manager(out_dir, argv_builder=argv_builder)
     handler = functools.partial(_ReportOnlyHandler, out_dir=out_dir, run_manager=run_manager)
     return _LoopbackTCPServer((host, port), handler)
 

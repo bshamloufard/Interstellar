@@ -400,13 +400,14 @@ class BuildTests(unittest.TestCase):
             session=_session(), baseline_version=_baseline_version(),
             patch_results=[_accepted_patch_result()], k=12, cost_usd=1.2345,
         )
-        # build() adds "rerun" on top of make_report()'s frozen shape (Task
-        # 2's stored re-run config) -- report.json is this module's own
+        # build() adds "rerun" and "trace_viz" on top of make_report()'s
+        # frozen shape (the run button's stored config, and the view-
+        # switcher's stored link) -- report.json is this module's own
         # artifact, not the types.py contract, so this is an intentional
         # addition, not a drift bug. See build()'s docstring.
         expected_keys = set(make_report(
             session={}, baseline_version={}, patch_results=[], caveats=[],
-        ).keys()) | {"rerun"}
+        ).keys()) | {"rerun", "trace_viz"}
         self.assertEqual(set(rpt.keys()), expected_keys)
         self.assertEqual(rpt["k"], 12)
         self.assertAlmostEqual(rpt["cost_usd"], 1.2345)
@@ -874,6 +875,117 @@ class RunPanelTests(unittest.TestCase):
             patch_results=[], k=5,
         )
         self.assertEqual(rpt["rerun"]["args"], {})
+
+
+class ViewSwitcherTests(unittest.TestCase):
+    """The Review/Trace view switcher (link to Alex's sa.serve trace
+    visualizer for the same session). The hard requirement it exists to
+    satisfy: a wrong-session link is worse than no link -- verified here
+    at both the build() (stored "trace_viz" key) and render_html() (what a
+    user actually sees) layers."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out_dir = Path(self.tmp.name) / "out"
+
+    def _build_and_write(self, **kwargs):
+        rpt = report.build(
+            session=_session(), baseline_version=_baseline_version(),
+            patch_results=[_accepted_patch_result()], k=12, **kwargs,
+        )
+        report.write(rpt, self.out_dir)
+        return rpt
+
+    def _html(self):
+        return (self.out_dir / "index.html").read_text(encoding="utf-8")
+
+    def _switcher(self, html_text):
+        # The <style> block unconditionally defines every view-link-* CSS
+        # class regardless of which one this render actually uses -- scope
+        # class-name assertions to the rendered <div class="view-switcher">
+        # markup itself, not the whole page, or a plain `in` check on e.g.
+        # "view-link-mismatch" would false-positive on the stylesheet.
+        start = html_text.index('<div class="view-switcher"')
+        return html_text[start:html_text.index("</div>", start) + len("</div>")]
+
+    # --- build() / stored config ------------------------------------------
+
+    def test_trace_viz_empty_when_url_not_given(self):
+        rpt = self._build_and_write()
+        self.assertEqual(rpt["trace_viz"], {})
+
+    def test_trace_viz_records_verified_match(self):
+        rpt = self._build_and_write(
+            trace_viz_url="http://127.0.0.1:8765/",
+            trace_viz_session_id=_session()["session_id"],
+        )
+        self.assertEqual(rpt["trace_viz"]["url"], "http://127.0.0.1:8765/")
+        self.assertEqual(rpt["trace_viz"]["session_id"], _session()["session_id"])
+        self.assertTrue(rpt["trace_viz"]["verified_match"])
+
+    def test_trace_viz_records_mismatch(self):
+        rpt = self._build_and_write(
+            trace_viz_url="http://127.0.0.1:8765/",
+            trace_viz_session_id="a-totally-different-session",
+        )
+        self.assertFalse(rpt["trace_viz"]["verified_match"])
+        self.assertEqual(rpt["trace_viz"]["session_id"], "a-totally-different-session")
+
+    def test_trace_viz_url_without_session_id_is_unverified_not_matched(self):
+        rpt = self._build_and_write(trace_viz_url="http://127.0.0.1:8765/")
+        self.assertEqual(rpt["trace_viz"]["session_id"], "")
+        self.assertFalse(rpt["trace_viz"]["verified_match"])
+
+    # --- rendering ----------------------------------------------------------
+
+    def test_no_switcher_rendered_when_url_unset(self):
+        self._build_and_write()
+        html_text = self._html()
+        self.assertNotIn('class="view-switcher"', html_text)
+
+    def test_switcher_renders_confirmed_link_on_session_match(self):
+        self._build_and_write(
+            trace_viz_url="http://127.0.0.1:8765/",
+            trace_viz_session_id=_session()["session_id"],
+        )
+        html_text = self._html()
+        switcher = self._switcher(html_text)
+        self.assertIn('href="http://127.0.0.1:8765/"', switcher)
+        self.assertIn('class="view-link"', switcher)
+        self.assertNotIn("view-link-mismatch", switcher)
+        self.assertNotIn("view-link-unverified", switcher)
+        self.assertIn(">Trace<", switcher)
+
+    def test_switcher_renders_loud_mismatch_warning_with_target_session_id(self):
+        self._build_and_write(
+            trace_viz_url="http://127.0.0.1:8765/",
+            trace_viz_session_id="019fe4e7-68a7-7073-b684-6a0f66025b25",
+        )
+        html_text = self._html()
+        switcher = self._switcher(html_text)
+        # rendered, not suppressed -- but unmistakably a warning, and the
+        # mismatched session id is spelled out in the visible label.
+        self.assertIn("view-link-mismatch", switcher)
+        self.assertIn("019fe4e7", switcher)
+        self.assertIn("WARNING", switcher)
+        self.assertIn(_session()["session_id"], switcher)  # own id, for comparison
+
+    def test_switcher_renders_unverified_when_no_target_session_id_given(self):
+        self._build_and_write(trace_viz_url="http://127.0.0.1:8765/")
+        html_text = self._html()
+        switcher = self._switcher(html_text)
+        self.assertIn("view-link-unverified", switcher)
+        self.assertNotIn("view-link-mismatch", switcher)
+
+    def test_switcher_link_opens_in_new_tab_without_opener_leak(self):
+        self._build_and_write(
+            trace_viz_url="http://127.0.0.1:8765/",
+            trace_viz_session_id=_session()["session_id"],
+        )
+        html_text = self._html()
+        self.assertIn('rel="noopener"', html_text)
+        self.assertIn('target="_blank"', html_text)
 
 
 def _shutdown_server(httpd, thread):
