@@ -578,5 +578,106 @@ class ExtractStructuredOutputTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class FlatLineRangesRegressionTests(unittest.TestCase):
+    """Review Important #1: a flat [start, end] pair (rather than
+    [[start, end]]) must degrade to one skipped patch, never crash the
+    whole from_recommendations call."""
+
+    def test_validator_does_not_raise_on_a_flat_pair(self):
+        coalesced, notes = patches._validate_and_coalesce_ranges([25, 32])
+        self.assertEqual(coalesced, [])
+        self.assertEqual(len(notes), 2)  # 25 and 32 each dropped individually
+        for note in notes:
+            self.assertIn("malformed range", note)
+
+    def test_validator_does_not_raise_when_ranges_itself_is_not_a_list(self):
+        coalesced, notes = patches._validate_and_coalesce_ranges(42)
+        self.assertEqual(coalesced, [])
+        self.assertEqual(len(notes), 1)
+
+    def test_flat_pair_recommendation_degrades_to_one_skipped_patch(self):
+        version = _version(skills=[_skill("strict-audit")])
+        rec = _rec(type="skill_truncate", target="strict-audit", line_ranges=[25, 32])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertEqual(len(out), 1)
+        self.assertIsNotNone(out[0]["skipped_reason"])
+
+    def test_flat_pair_recommendation_does_not_take_down_the_rest_of_the_batch(self):
+        version = _version(skills=[_skill("strict-audit")])
+        bad = _rec(type="skill_truncate", target="strict-audit", line_ranges=[25, 32])
+        good = _rec(type="skill_truncate", target="strict-audit", line_ranges=[[10, 12]])
+        keep = _rec(type="skill_keep", target="strict-audit")
+        remove = _rec(type="skill_remove", target="db-migrate")
+        out = patches.from_recommendations([bad, good, keep, remove], version,
+                                            digest=EMPTY_DIGEST)
+        # bad -> 1 skipped patch, good -> 1 live patch, keep -> 0, remove -> 1
+        self.assertEqual(len(out), 3)
+        skipped = [p for p in out if p["skipped_reason"]]
+        live = [p for p in out if not p["skipped_reason"]]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(len(live), 2)
+
+
+class UnknownSkillTargetTests(unittest.TestCase):
+    """Review Important #2: an unknown target skill must not silently pass
+    through with unvalidated ranges and no orphan measurement."""
+
+    def test_unknown_target_is_skipped_not_silently_unvalidated(self):
+        version = _version()  # no skills at all -- "ghost" is not in it
+        rec = _rec(type="skill_truncate", target="ghost", line_ranges=[[1, 5]])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertEqual(len(out), 1)
+        p = out[0]
+        self.assertIsNotNone(p["skipped_reason"])
+        self.assertIn("not found in harness version", p["skipped_reason"])
+
+    def test_unknown_target_with_absurd_range_is_still_skipped_for_the_right_reason(self):
+        # A huge range on an unknown skill must not slip through just
+        # because no length bound was available to catch it, and must not
+        # be silently attributed to MAX_PATCH_LINES either -- the real
+        # reason is that the target does not exist.
+        version = _version()
+        rec = _rec(type="skill_truncate", target="ghost", line_ranges=[[1, 99999]])
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        p = out[0]
+        self.assertIsNotNone(p["skipped_reason"])
+        self.assertIn("not found in harness version", p["skipped_reason"])
+        self.assertNotIn("MAX_PATCH_LINES", p["skipped_reason"])
+
+
+class RulesAppendBoundTests(unittest.TestCase):
+    """Review Important #3: rules.append had no MAX_PATCH_LINES cap."""
+
+    def test_many_line_action_text_is_rejected(self):
+        version = _version()
+        action = "\n".join(f"line {i}" for i in range(1, 82))  # 81 lines
+        rec = _rec(type="tool_redundant", action=action)
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        p = out[0]
+        self.assertIsNotNone(p["skipped_reason"])
+        self.assertIn("MAX_PATCH_LINES", p["skipped_reason"])
+
+    def test_exactly_60_lines_is_not_rejected(self):
+        version = _version()
+        action = "\n".join(f"line {i}" for i in range(1, 61))  # 60 lines
+        rec = _rec(type="tool_redundant", action=action)
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertIsNone(out[0]["skipped_reason"])
+
+    def test_61_lines_is_rejected(self):
+        version = _version()
+        action = "\n".join(f"line {i}" for i in range(1, 62))  # 61 lines
+        rec = _rec(type="tool_redundant", action=action)
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertIsNotNone(out[0]["skipped_reason"])
+
+    def test_ordinary_one_line_action_is_unaffected(self):
+        version = _version()
+        rec = _rec(type="permission_friction", action="Batch reads before writes.")
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertIsNone(out[0]["skipped_reason"])
+        self.assertEqual(out[0]["rule_text"], "Batch reads before writes.")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -188,20 +188,35 @@ def win_rate(grades, *, iters=DEFAULT_ITERS, seed=DEFAULT_SEED):
     on very few decided pairs while the tie count stays large, so `ties` is
     always reported alongside `rate`, never dropped.
 
-    CI availability follows the same sample-size floor as paired_bootstrap
-    (research-methods.md sec 1), using n = judged pairs -- the resampling
-    unit here is the per-pair win/tie/loss label, exactly analogous to a
-    paired delta:
-      n < MIN_SAMPLES_FOR_CI (10)              -> note="insufficient_samples"
-      MIN_SAMPLES_FOR_CI <= n < LOW_CONFIDENCE_CI (10-19)
-                                                -> CI reported, note="low_confidence"
-      n >= LOW_CONFIDENCE_CI (20+)              -> CI reported, note=None
+    CI availability is keyed on `decided` (wins + losses), NOT on the total
+    judged-pair count `n` -- `rate` is computed from decided pairs only
+    (ties are excluded from its denominator), so `decided` is the sample
+    size that actually bears on the interval's honesty. A 12-pair batch
+    that is 11 ties and 1 treatment win has n=12 but decided=1; keying the
+    floor on n alone would print a confident-looking [1.0, 1.0] interval
+    off a single decided pair -- exactly the fabricated-precision failure
+    mode this module exists to refuse (fix-round-2 review, Important #1).
+    So the regime table is in terms of `decided`, same thresholds as
+    paired_bootstrap:
+      decided == 0                                -> note="no_decided_pairs"
+      0 < decided < MIN_SAMPLES_FOR_CI (10)        -> note="insufficient_decided_pairs"
+      MIN_SAMPLES_FOR_CI <= decided < LOW_CONFIDENCE_CI (10-19)
+                                                    -> CI reported, note="low_confidence"
+      decided >= LOW_CONFIDENCE_CI (20+)            -> CI reported, note=None
+    `n == 0` (no judged pairs at all -- every run failed) is its own note,
+    "insufficient_samples", checked first since it's a different fact than
+    "plenty of judged pairs, none of them decided".
     `rate` (the point estimate) is still reported below the CI floor -- it
-    is a real number, just uninterval-ed. `distinct_resamples` is reported
-    alongside, same as paired_bootstrap.
+    is a real number, just uninterval-ed. `distinct_resamples` is
+    `_distinct_resamples(decided)` for the same reason the floor is keyed
+    on `decided`: the honesty number printed next to the interval should
+    describe the count the rate is actually computed from.
 
-    decided == 0 (all ties) is its own note, "no_decided_pairs" -- there is
-    nothing to rate regardless of n, but wins/ties/losses/n stay visible.
+    The resample itself still draws from all n judged win/tie/loss labels,
+    not just the decided subset -- each bootstrap draw needs to see the
+    real tie/decided proportion in the batch, or the interval would
+    implicitly condition on decidedness without saying so. A resample with
+    zero decided pairs is simply excluded from the percentile calculation.
     """
     judged = [g for g in grades if g.get("judge")]
     n = len(judged)
@@ -214,17 +229,17 @@ def win_rate(grades, *, iters=DEFAULT_ITERS, seed=DEFAULT_SEED):
         "wins": wins, "ties": ties, "losses": losses, "n": n,
         "rate": (wins / decided) if decided > 0 else None,
         "lo": None, "hi": None, "note": None,
-        "distinct_resamples": _distinct_resamples(n),
+        "distinct_resamples": _distinct_resamples(decided),
     }
 
     if n == 0:
         result["note"] = NOTE_INSUFFICIENT
         return result
-    if n < MIN_SAMPLES_FOR_CI:
-        result["note"] = NOTE_INSUFFICIENT
-        return result
     if decided == 0:
         result["note"] = "no_decided_pairs"
+        return result
+    if decided < MIN_SAMPLES_FOR_CI:
+        result["note"] = "insufficient_decided_pairs"
         return result
 
     labels = []
@@ -256,7 +271,7 @@ def win_rate(grades, *, iters=DEFAULT_ITERS, seed=DEFAULT_SEED):
     resample_rates.sort()
     result["lo"] = _percentile(resample_rates, 2.5)
     result["hi"] = _percentile(resample_rates, 97.5)
-    if n < LOW_CONFIDENCE_CI:
+    if decided < LOW_CONFIDENCE_CI:
         result["note"] = NOTE_LOW_CONFIDENCE
     return result
 
@@ -550,11 +565,16 @@ def summarize(grades, *, primary_effect, seed=DEFAULT_SEED):
              own docstring for the full per-metric shape.
         "pass_k": pass_k([...]),
              -- reliability of the CANDIDATE (treatment) harness completing
-             at all, from each grade's control_ok/treatment_ok
-             (types.make_grade); NOT the control's, since pass_k here is
-             answering "does the patched harness reliably finish", and k
-             defaults to len(grades) (see pass_k's docstring on
-             `degenerate` -- true for our v1 one-prompt-per-patch design).
+             at all, from each grade's treatment_ok (types.make_grade); NOT
+             the control's, since pass_k here is answering "does the
+             patched harness reliably finish". A grade missing the
+             "treatment_ok" key entirely is DROPPED, not counted as a
+             success -- a missing measurement must never default to
+             optimistic (fix-round-2 review, Important #3); this can only
+             happen to a hand-assembled grade dict, since
+             types.make_grade always sets the key. k defaults to the
+             resulting count (see pass_k's docstring on `degenerate` --
+             true for our v1 one-prompt-per-patch design).
         "regressions": flattened make_regression() dicts across every
              grade's grade["regressions"] for this patch.
         "judge_consistency": grade.judge_consistency(grades) -- position-
@@ -569,16 +589,38 @@ def summarize(grades, *, primary_effect, seed=DEFAULT_SEED):
     metric_name = EFFECT_TO_EFFICIENCY_METRIC[primary_effect]
     primary_deltas = _metric_deltas(grades, metric_name)
 
+    _unset = object()
+    treatment_outcomes = [g.get("treatment_ok", _unset) for g in grades]
+    treatment_outcomes = [v for v in treatment_outcomes if v is not _unset]
+
     return {
         "n": len(grades),
         "win_rate": win_rate(grades, seed=seed),
         "permutation": permutation_test(primary_deltas, seed=seed),
         "efficiency": efficiency_deltas(grades, seed=seed),
-        "pass_k": pass_k([g.get("treatment_ok", True) for g in grades]),
+        "pass_k": pass_k(treatment_outcomes),
         "regressions": [r for g in grades for r in (g.get("regressions") or [])],
         "judge_consistency": judge_consistency(grades),
         "primary_effect": primary_effect,
     }
+
+
+def _point_improvement_sign(mean, lower_is_better):
+    """Sign of a point estimate in "improvement space": +1 improved,
+    -1 worsened, 0 unknown (`mean` is None) or exactly unchanged.
+
+    This module's delta convention is control - treatment throughout. For a
+    lower_is_better metric a positive delta already means improvement; for
+    a higher-is-better metric (none exist in EFFICIENCY_METRICS today, but
+    `lower_is_better` -- types.py:60-61 -- exists specifically so one can be
+    added later) it must be negated, or a genuine regression on such a
+    metric would be read as an improvement (fix-round-2 review,
+    Important #4: `lower_is_better` was carried but never consulted).
+    """
+    if mean is None:
+        return 0
+    raw = (mean > 0) - (mean < 0)
+    return raw if lower_is_better else -raw
 
 
 def _directional(win_rate_stats, primary_entry):
@@ -589,9 +631,17 @@ def _directional(win_rate_stats, primary_entry):
 
     Combines the sign of (wins - losses) with the sign of the primary
     metric's point estimate (paired_bootstrap always reports a real `mean`,
-    even below MIN_SAMPLES_FOR_CI). Both signals must agree, or one be
-    silent (zero), to call it favorable/unfavorable; outright disagreement
-    reads as "neutral" rather than arbitrarily picking a side.
+    even below MIN_SAMPLES_FOR_CI), the latter corrected for
+    `lower_is_better` via `_point_improvement_sign`. Both signals must
+    agree, or one be silent (zero), to call it favorable/unfavorable;
+    outright disagreement reads as "neutral" rather than arbitrarily
+    picking a side.
+
+    This function does NOT look at regressions -- `gate` is responsible for
+    forcing the result to "unfavorable" when a high-severity regression is
+    present (fix-round-2 review, Critical: a crash must never be
+    describable as "favorable", and that veto belongs in one place, not
+    duplicated into every signal source).
     """
     wins = (win_rate_stats or {}).get("wins", 0)
     losses = (win_rate_stats or {}).get("losses", 0)
@@ -600,8 +650,8 @@ def _directional(win_rate_stats, primary_entry):
     efficiency_sign = 0
     if primary_entry is not None:
         mean = (primary_entry.get("bootstrap") or {}).get("mean")
-        if mean is not None:
-            efficiency_sign = (mean > 0) - (mean < 0)
+        lower_is_better = primary_entry.get("lower_is_better", True)
+        efficiency_sign = _point_improvement_sign(mean, lower_is_better)
 
     if quality_sign >= 0 and efficiency_sign >= 0 and (quality_sign or efficiency_sign):
         return "favorable"
@@ -657,21 +707,38 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
     total_tokens regression safety net: independent of whatever the primary
     metric is, total_tokens must not have regressed past
     `max_token_regression` (default 10%) using its point-estimate pct_delta.
-    Unmeasured total_tokens does not itself fail the gate -- reported as
-    unchecked.
+    Unmeasured total_tokens does NOT pass silently -- the check cannot fail
+    open (fix-round-2 review, Important #2): a missing delta forces
+    `provisional=True` (unless a high-severity regression has already
+    forced the decision to an outright reject; see below), because the
+    blowup this net exists to catch could be hiding behind the missing
+    data.
+
+    High-severity regressions dominate everything above: a crash is the
+    strongest negative evidence this system can produce, so it is computed
+    FIRST and, if present, forces `accepted=False`, `provisional=False`
+    (never a soft "come back with more data" verdict for a crash), and
+    `directional="unfavorable"` (never "favorable" or "neutral", regardless
+    of what the win/loss counts or efficiency point estimate say) as an
+    unconditional final step -- nothing computed earlier in this function
+    can survive that override (fix-round-2 review, Critical).
 
     Returns {accepted, provisional, directional, reasons}:
       accepted    - bool, the final call.
-      provisional - bool. True iff the quality check used the small-n (5-9,
-                    no-CI) zero-losses fallback rather than a full n>=10
-                    CI-backed decision. An accepted:True result with
-                    provisional:True should render as a qualified verdict,
-                    not a clean pass.
+      provisional - bool. True iff the decision rests on evidence weaker
+                    than the module's full-power regime: the whole small-n
+                    (5-9, no-CI) quality zone -- an accept there, AND a
+                    reject there, since neither has a CI to back it -- or
+                    an unmeasured total_tokens safety net. Always False
+                    when a high-severity regression is present (see
+                    above). An accepted:True result with provisional:True should
+                    render as a qualified verdict, not a clean pass.
       directional - "favorable" | "unfavorable" | "neutral": what the
                     evidence points toward regardless of whether accepted
                     is True -- always populated, including at n < 5 where
                     acceptance is impossible by construction, so the report
                     always has something better to show than a bare "no".
+                    Forced to "unfavorable" by a high-severity regression.
       reasons     - list[str], one per check, for both accept and reject,
                     so the report can always explain itself. Includes two
                     informational lines (judge position-consistency, the
@@ -692,11 +759,21 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
     n = wr.get("n", 0)
     wins = wr.get("wins", 0)
     losses = wr.get("losses", 0)
+    ties = wr.get("ties", 0)
     lo = wr.get("lo")
 
     efficiency = summary.get("efficiency") or {}
     primary_entry = efficiency.get(primary_metric) if primary_metric else None
     directional = _directional(wr, primary_entry)
+
+    # Computed first, per the Critical fix, so it can dominate everything
+    # below -- see the unconditional override at the very end of this
+    # function. The reason string is still emitted at its original
+    # position (after the quality reason) so `reasons` keeps its familiar
+    # "quality, regressions, primary metric, token safety net" order.
+    all_regressions = summary.get("regressions") or []
+    high = [r for r in all_regressions if r.get("severity") == "high"]
+    has_high_severity = bool(high)
 
     # --- 1. quality, sample-size-aware ---
     if n < MIN_SAMPLES_FOR_ACCEPT:
@@ -708,12 +785,17 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
             "at k=3; see research-methods.md sec 5.1)"
         )
     elif n < MIN_SAMPLES_FOR_CI:
+        # provisional=True for the whole 5-9 regime (accept OR reject sub-
+        # branch): it describes "this decision rests on the small-n no-CI
+        # zone", which report.py's PROVISIONAL badge state renders for
+        # both a qualified accept and a not-yet-confident reject -- not
+        # only for the accept path.
         provisional = True
         if losses == 0:
             reasons.append(
                 f"provisional quality pass: 0 losses out of {n} judged pairs "
-                f"(n<{MIN_SAMPLES_FOR_CI}, no bootstrap CI available -- "
-                "see research-methods.md sec 1)"
+                f"({wins} win(s), {ties} tie(s); n<{MIN_SAMPLES_FOR_CI}, no "
+                "bootstrap CI available -- see research-methods.md sec 1)"
             )
         else:
             accepted = False
@@ -724,7 +806,10 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
             )
     else:
         if losses == 0:
-            reasons.append(f"quality: 0 losses out of {n} judged pairs")
+            reasons.append(
+                f"quality: 0 losses out of {n} judged pairs "
+                f"({wins} win(s), {ties} tie(s))"
+            )
         elif lo is not None and lo >= 0.5:
             reasons.append(f"quality: win-rate lower CI {lo:.2f} >= 0.5")
         else:
@@ -735,16 +820,19 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
             )
 
     # --- 2. high-severity regressions ---
-    all_regressions = summary.get("regressions") or []
-    high = [r for r in all_regressions if r.get("severity") == "high"]
-    if high:
+    if has_high_severity:
         accepted = False
         details = "; ".join(r.get("detail", "") for r in high)
-        reasons.append(f"{len(high)} high-severity regression(s): {details}")
+        reasons.append(
+            f"{len(high)} high-severity regression(s): {details} -- vetoes "
+            'any provisional accept and forces directional to "unfavorable"'
+        )
     else:
         reasons.append("no high-severity regressions")
 
-    # --- 3. primary efficiency target improves, sample-size-aware ---
+    # --- 3. primary efficiency target improves, sample-size-aware, and
+    # honoring lower_is_better so a future higher-is-better metric is not
+    # read upside down (fix-round-2 review, Important #4). ---
     if not effect:
         accepted = False
         reasons.append("no primary_effect declared: cannot verify the claimed effect improved")
@@ -756,43 +844,67 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
         reasons.append(f"primary metric {primary_metric!r} (from effect {effect!r}) not present in efficiency stats")
     else:
         boot = primary_entry.get("bootstrap") or {}
-        p_n = boot.get("n", 0)
+        lower_is_better = primary_entry.get("lower_is_better", True)
+        p_n = boot.get("n")
         p_mean = boot.get("mean")
         p_lo, p_hi = boot.get("lo"), boot.get("hi")
         if p_mean is None:
             accepted = False
             reasons.append(f"primary metric {primary_metric!r}: no paired data available")
+        elif p_n is None:
+            # A bootstrap dict missing "n" entirely (only reachable via a
+            # hand-assembled summary) must fail the check, not default to
+            # the weaker small-n branch (fix-round-2 review, Minor #5).
+            accepted = False
+            reasons.append(
+                f"primary metric {primary_metric!r}: bootstrap dict missing sample "
+                "size ('n') -- cannot evaluate, treated as a failure not a pass"
+            )
         elif p_n >= MIN_SAMPLES_FOR_CI:
-            if p_lo is not None and p_lo > 0:
+            credible = ((p_lo is not None and p_lo > 0) if lower_is_better
+                        else (p_hi is not None and p_hi < 0))
+            if credible:
                 reasons.append(
                     f"primary metric {primary_metric!r} improved: paired-diff CI "
-                    f"[{p_lo:.3g}, {p_hi:.3g}] entirely > 0"
+                    f"[{p_lo:.3g}, {p_hi:.3g}] entirely favors the treatment "
+                    f"(lower_is_better={lower_is_better})"
                 )
             else:
                 accepted = False
                 reasons.append(
                     f"primary metric {primary_metric!r} did not credibly improve: "
-                    f"paired-diff CI [{p_lo!r}, {p_hi!r}] includes zero or below"
+                    f"paired-diff CI [{p_lo!r}, {p_hi!r}] does not entirely favor "
+                    f"the treatment (lower_is_better={lower_is_better})"
                 )
         else:
-            if p_mean > 0:
+            sign = _point_improvement_sign(p_mean, lower_is_better)
+            if sign > 0:
                 reasons.append(
                     f"primary metric {primary_metric!r} improved directionally: point "
-                    f"estimate {p_mean:.3g} (n={p_n} < {MIN_SAMPLES_FOR_CI}, no CI "
-                    "-- directional signal only, see research-methods.md sec 1)"
+                    f"estimate {p_mean:.3g} (n={p_n} < {MIN_SAMPLES_FOR_CI}, no CI -- "
+                    f"directional signal only, lower_is_better={lower_is_better}, see "
+                    "research-methods.md sec 1)"
                 )
             else:
                 accepted = False
                 reasons.append(
                     f"primary metric {primary_metric!r} did not improve: point estimate "
-                    f"{p_mean:.3g} <= 0 (n={p_n} < {MIN_SAMPLES_FOR_CI}, directional read only)"
+                    f"{p_mean:.3g} (n={p_n} < {MIN_SAMPLES_FOR_CI}, directional read only, "
+                    f"lower_is_better={lower_is_better})"
                 )
 
-    # --- 4. total_tokens regression safety net ---
+    # --- 4. total_tokens regression safety net -- fails CLOSED (Important #2):
+    # an unmeasured delta downgrades the decision to provisional instead of
+    # passing through unchecked. ---
     tokens = efficiency.get("total_tokens")
     pct = tokens.get("pct_delta") if tokens else None
     if pct is None:
-        reasons.append("total_tokens delta unavailable, regression threshold not checked")
+        provisional = True
+        reasons.append(
+            "total_tokens delta unavailable: regression threshold NOT checked -- "
+            "treating this decision as provisional rather than letting the safety "
+            "net fail open"
+        )
     elif pct < -max_token_regression:
         accepted = False
         reasons.append(
@@ -824,6 +936,14 @@ def gate(summary, *, primary_effect=None, max_token_regression=0.10):
             "-- informational, not part of the accept decision; see "
             "research-methods.md sec 1 for why a k=3/5 p-value can't gate anything"
         )
+
+    # --- final, unconditional override (Critical fix): a high-severity
+    # regression dominates every signal above, no matter what order future
+    # edits put them in. ---
+    if has_high_severity:
+        accepted = False
+        provisional = False
+        directional = "unfavorable"
 
     return {"accepted": accepted, "provisional": provisional,
             "directional": directional, "reasons": reasons}

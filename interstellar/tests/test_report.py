@@ -98,10 +98,14 @@ def _synthetic_grades(n, *, skill_tokens_improvement=0, verdict="treatment",
     return grades
 
 
-def _patch_result(patch_id, target, grades, *, rationale, verdict_line, diff=SAMPLE_DIFF):
+def _patch_result(patch_id, target, grades, *, rationale, verdict_line, diff=SAMPLE_DIFF, applied=True):
     """Builds a real make_patch_result() by calling stats.summarize() and
     stats.gate() on `grades` — the same call cli.py makes — instead of
-    hand-assembling `statistics`/`gate`."""
+    hand-assembling `statistics`/`gate`. `applied` and `diff` are
+    independent: a patch that ran and was measured but happens to have no
+    diff text to show (diff="") is still `applied=True` -- conflating
+    "empty diff" with "never applied" is exactly the C-1 bug this module
+    now guards against, so the fixture must not make that mistake either."""
     summary = stats.summarize(grades, primary_effect=EFFECT_SKILL_TOKENS)
     gate_result = stats.gate(summary)
     patch = make_patch(
@@ -109,7 +113,7 @@ def _patch_result(patch_id, target, grades, *, rationale, verdict_line, diff=SAM
         rationale=rationale, expected_effect=EFFECT_SKILL_TOKENS,
         source_recommendation=f"rec-{patch_id}", diff=diff,
     )
-    application = make_patch_application(patch_id=patch_id, applied=bool(diff), diff=diff, lines_changed=2 if diff else 0)
+    application = make_patch_application(patch_id=patch_id, applied=applied, diff=diff, lines_changed=2 if diff else 0)
     n = len(grades)
     matrix_summary = {
         "prompt": "do the thing", "k": n, "patch_id": patch_id,
@@ -213,6 +217,67 @@ def _rejected_patch_result():
         "p6", "risky-skill", grades,
         rationale="Removes error-handling code the agent actually relies on.",
         verdict_line="Regresses skill tokens and quality, with a high-severity MCP failure: reject.",
+    )
+
+
+def _not_run_patch_result():
+    """C-1: the patch was never applied at all -- no grades, no
+    measurement. cli.py's not-applied gate result still carries
+    directional/reasons fields (stats.gate() knows nothing about
+    `application["applied"]`), so without the applied-first check this
+    would fall through to a red REJECTED and read as "measured and lost"
+    instead of "never built.\""""
+    patch = make_patch(
+        patch_id="p9", kind=PATCH_SKILL_TRUNCATE, target="stale-skill",
+        rationale="Trims a section whose line numbers may have drifted.",
+        expected_effect=EFFECT_SKILL_TOKENS, source_recommendation="rec-p9", diff="",
+    )
+    application = make_patch_application(
+        patch_id="p9", applied=False, diff="",
+        reason="lint: cited line range [10, 999] exceeds file length (42 lines)",
+    )
+    matrix_summary = {
+        "prompt": "do the thing", "k": 0, "patch_id": "p9",
+        "control_version_id": "base-abc", "treatment_version_id": "treat-p9",
+        "arms": {ARM_CONTROL: [], ARM_TREATMENT: []},
+    }
+    gate = {
+        "accepted": False, "provisional": False, "directional": "neutral",
+        "reasons": ["patch not applied: lint: cited line range [10, 999] exceeds file length (42 lines)"],
+    }
+    return make_patch_result(
+        patch=patch, application=application, matrix_summary=matrix_summary,
+        grades=[], statistics={}, gate=gate,
+        verdict_line="Never applied: the cited line range no longer matches the file.",
+    )
+
+
+def _high_regression_but_favorable_gate_patch_result():
+    """C-2: treatment wins every judged pair right up until it crashes the
+    harness on one repeat with a high-severity regression. win/loss counts
+    and the efficiency point estimate alone (what stats.gate()'s
+    `directional` is computed from) still read favorable -- the badge must
+    override that itself rather than trust the gate to have noticed."""
+    grades = _synthetic_grades(5, skill_tokens_improvement=1100, verdict="treatment", consistent=True, high_regression_on_first=True)
+    return _patch_result(
+        "p10", "crashy-skill", grades,
+        rationale="Removes a fallback path the harness turns out to depend on.",
+        verdict_line="Won every judged pair, but crashed the harness once with a high-severity failure.",
+    )
+
+
+def _accepted_zero_decided_pairs_patch_result():
+    """I-1: n=12 (full CI zone), every judged pair a TIE (0 wins, 0
+    losses). stats.gate()'s quality check passes on losses==0 -- true
+    regardless of ties -- and the primary metric's CI genuinely clears
+    zero, so accepted=True with ZERO quality evidence behind it. Must
+    render as a qualified badge adjacent to the "0 decided pairs" fact,
+    not a plain green ACCEPTED indistinguishable from a real win."""
+    grades = _synthetic_grades(12, skill_tokens_improvement=1100, verdict="tie", consistent=True)
+    return _patch_result(
+        "p8", "quiet-win-skill", grades,
+        rationale="Removes a paragraph the judge never seemed to notice either way.",
+        verdict_line="Judge called every pair a tie, but skill tokens measurably dropped.",
     )
 
 
@@ -391,8 +456,24 @@ class WriteTests(unittest.TestCase):
         html_text = self._html()
         self.assertIn('class="badge directional-favorable">DIRECTIONAL &middot; FAVORABLE</span>', html_text)
 
-    def test_gate_badge_rejected_confident_at_full_n(self):
+    def test_gate_badge_regressed_overrides_rejected_when_high_severity_present(self):
+        # _rejected_patch_result carries a high-severity regression, so C-2's
+        # override fires before the normal 5-state table is even consulted --
+        # REGRESSED, not a bare REJECTED, and the count is in the badge text
+        # itself (inside .patch-head, not just in the collapsible body).
         self._build_and_write([_rejected_patch_result()], k=12)
+        html_text = self._html()
+        self.assertIn('class="badge regressed">REGRESSED &middot; 1 HIGH-SEVERITY</span>', html_text)
+        self.assertNotIn('class="badge reject"', html_text)
+
+    def test_gate_badge_rejected_confident_no_regression(self):
+        grades = _synthetic_grades(12, skill_tokens_improvement=-1100, verdict="control", consistent=True)
+        pr = _patch_result(
+            "p11", "losing-skill", grades,
+            rationale="Removes a paragraph that turns out to matter.",
+            verdict_line="Regresses skill tokens and quality: reject, no crash involved.",
+        )
+        self._build_and_write([pr], k=12)
         html_text = self._html()
         self.assertIn('class="badge reject">REJECTED</span>', html_text)
 
@@ -469,11 +550,15 @@ class WriteTests(unittest.TestCase):
 
     # --- permutation test / pass^k ---------------------------------------
 
-    def test_permutation_floor_phrasing_unanimous_large_n(self):
+    def test_permutation_floor_phrasing_suppressed_when_test_is_well_powered(self):
+        # M-3: at n=12 the floor (min_achievable_p ~= 0.00049) is far below
+        # 0.05 -- this test IS well-powered, so the "as extreme as this
+        # permits" hedge (written for the k=3/5 case) must not appear and
+        # hedge away a genuinely strong result.
         self._build_and_write([_accepted_patch_result()], k=12)
         html_text = self._html()
-        self.assertIn("as extreme as n=12 permits", html_text)
-        self.assertIn("not evidence of no effect", html_text)
+        self.assertNotIn("as extreme as n=12 permits", html_text)
+        self.assertIn("p=0.000488", html_text)
 
     def test_permutation_floor_phrasing_small_n(self):
         self._build_and_write([_provisional_reject_patch_result()], k=5)

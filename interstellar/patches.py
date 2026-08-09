@@ -259,11 +259,26 @@ def _validate_and_coalesce_ranges(ranges, skill_lines=None):
     """
     valid = []
     notes = []
-    for r in ranges:
-        if len(r) != 2 or not all(isinstance(x, int) and not isinstance(x, bool) for x in r):
+    try:
+        items = list(ranges)
+    except TypeError:
+        return [], [f"line_ranges was not a list: {ranges!r}"]
+
+    for r in items:
+        # A malformed shape here (a flat [start, end] pair instead of
+        # [[start, end]], a bare int, a string...) must degrade to one
+        # dropped range with a note, never raise -- one bad shape from the
+        # analyzer must not take down every other recommendation in the
+        # same call.
+        try:
+            pair = list(r)
+        except TypeError:
+            notes.append(f"dropped malformed range {r!r}: not a [start, end] pair")
+            continue
+        if len(pair) != 2 or not all(isinstance(x, int) and not isinstance(x, bool) for x in pair):
             notes.append(f"dropped malformed range {r!r}")
             continue
-        start, end = r
+        start, end = pair
         if start < 1 or end < start:
             notes.append(f"dropped invalid range [{start}, {end}]: not 1-based/ordered")
             continue
@@ -329,7 +344,12 @@ def _count_orphans(text, ranges):
 
 def _skill_truncate_patch(rec, skill_index, patch_id):
     target = rec.get("target", "")
-    raw_ranges = [list(r) for r in (rec.get("line_ranges") or [])]
+    # Deliberately not coerced/iterated here: a malformed shape (e.g. a flat
+    # [start, end] pair where [[start, end]] was meant) must be diagnosed
+    # per-range inside _validate_and_coalesce_ranges, not raise here and take
+    # every other recommendation in the same from_recommendations call down
+    # with it.
+    raw_ranges = rec.get("line_ranges") or []
     if not raw_ranges:
         return make_patch(
             patch_id=patch_id, kind=PATCH_SKILL_TRUNCATE, target=target,
@@ -338,7 +358,19 @@ def _skill_truncate_patch(rec, skill_index, patch_id):
             skipped_reason="skill_truncate recommendation cited no line_ranges")
 
     skill = skill_index.get(target)
-    skill_lines = skill.get("lines") if skill is not None else None
+    if skill is None:
+        # Without the skill's recorded content there is nothing to validate
+        # ranges against and no text to run the orphan check on -- emitting
+        # a "not skipped" patch here would look bounded and measured while
+        # actually being neither, and harness.apply will fail on it anyway.
+        return make_patch(
+            patch_id=patch_id, kind=PATCH_SKILL_TRUNCATE, target=target,
+            rationale=_rationale(rec), expected_effect=EFFECT_SKILL_TOKENS,
+            source_recommendation=rec, line_ranges=[],
+            skipped_reason=f"skill {target!r} not found in harness version "
+                           "(cannot validate line ranges or measure orphans)")
+
+    skill_lines = skill.get("lines")
     ranges, drop_notes = _validate_and_coalesce_ranges(raw_ranges, skill_lines)
 
     if not ranges:
@@ -355,12 +387,11 @@ def _skill_truncate_patch(rec, skill_index, patch_id):
         skipped = (f"truncate touches {touched} lines, exceeds "
                    f"MAX_PATCH_LINES={MAX_PATCH_LINES}")
 
+    orphans = _count_orphans(skill["content"], ranges)
+    plural = "" if orphans == 1 else "s"
     extra_parts = list(drop_notes)
-    if skill is not None:
-        orphans = _count_orphans(skill["content"], ranges)
-        plural = "" if orphans == 1 else "s"
-        extra_parts.append(
-            f"leaves {orphans} orphaned fragment{plural} from partial section deletion")
+    extra_parts.append(
+        f"leaves {orphans} orphaned fragment{plural} from partial section deletion")
 
     return make_patch(
         patch_id=patch_id, kind=PATCH_SKILL_TRUNCATE, target=target,
@@ -461,12 +492,16 @@ def _mcp_action_patches(rec, digest_mcp, digest_failed, counter):
 def _rules_append_patch(rec, effect, patch_id):
     rule_text = (rec.get("action") or "").strip()
     rationale = _rationale(rec)
-    violations = security_lint(rule_text)
+    reasons = security_lint(rule_text)
+    touched = len(rule_text.splitlines()) or 1  # an empty string is still "one" empty line
+    if touched > MAX_PATCH_LINES:
+        reasons.append(f"rules.append touches {touched} lines, exceeds "
+                       f"MAX_PATCH_LINES={MAX_PATCH_LINES}")
     return make_patch(
         patch_id=patch_id, kind=PATCH_RULES_APPEND, target="rules",
         rationale=rationale, expected_effect=effect, source_recommendation=rec,
         rule_text=rule_text,
-        skipped_reason="; ".join(violations) if violations else None)
+        skipped_reason="; ".join(reasons) if reasons else None)
 
 
 # --- dedup ---------------------------------------------------------------------

@@ -476,12 +476,15 @@ class ProgressJournalTests(unittest.TestCase):
         self.assertIn("$0.05", caveats_text)
 
     def test_writes_only_inside_out_dir(self):
-        # scratch/materialized homes and per-patch matrices must all live
-        # under --out.
+        # scratch/materialized homes (one per run, per replay.run_matrix)
+        # and per-patch matrices must all live under --out.
         self._run()
         scratch = self.out_dir / "scratch"
         self.assertTrue(scratch.is_dir())
-        self.assertTrue((scratch / "control-template" / "config.toml").is_file())
+        control_homes = list(scratch.glob("*/runs/control-0-home/config.toml"))
+        treatment_homes = list(scratch.glob("*/runs/treatment-0-home/config.toml"))
+        self.assertEqual(len(control_homes), 2)  # one per selected patch
+        self.assertEqual(len(treatment_homes), 2)
         patches_dir = self.out_dir / "patches"
         self.assertTrue(patches_dir.is_dir())
         matrix_files = list(patches_dir.glob("*/matrix.json"))

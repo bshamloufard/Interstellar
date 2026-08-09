@@ -147,16 +147,56 @@ class WinRateTest(unittest.TestCase):
         self.assertEqual(r["rate"], 1.0)  # real point estimate, not suppressed
         self.assertIsNone(r["lo"])
         self.assertIsNone(r["hi"])
-        self.assertEqual(r["note"], "insufficient_samples")
+        # decided=1 < MIN_SAMPLES_FOR_CI -- decided-keyed note (fix-round-2, Important #1)
+        self.assertEqual(r["note"], "insufficient_decided_pairs")
 
     def test_below_min_samples_for_ci_still_insufficient(self):
-        # n=8, below MIN_SAMPLES_FOR_CI (10) -- no CI even though > old floor of 3.
+        # n=8 decided, below MIN_SAMPLES_FOR_CI (10) -- no CI even though > old floor of 3.
         grades = [_grade(i, verdict=ARM_TREATMENT) for i in range(8)]
         r = stats.win_rate(grades, iters=200, seed=0)
         self.assertEqual(r["n"], 8)
         self.assertEqual(r["rate"], 1.0)
         self.assertIsNone(r["lo"])
-        self.assertEqual(r["note"], "insufficient_samples")
+        self.assertEqual(r["note"], "insufficient_decided_pairs")
+
+    def test_ci_floor_keyed_on_decided_not_judged_pairs(self):
+        # fix-round-2 review, Important #1: 12 judged, 11 ties + 1 win --
+        # decided=1. Keying the floor on n=12 (>= MIN_SAMPLES_FOR_CI) would
+        # print a fabricated zero-width [1.0, 1.0] interval off a single
+        # decided pair; keying it on decided=1 correctly refuses one.
+        grades = [_grade(0, verdict=ARM_TREATMENT)] + [_grade(i, verdict="tie") for i in range(1, 12)]
+        r = stats.win_rate(grades, iters=500, seed=0)
+        self.assertEqual(r["n"], 12)
+        self.assertEqual(r["wins"], 1)
+        self.assertEqual(r["ties"], 11)
+        self.assertEqual(r["rate"], 1.0)
+        self.assertIsNone(r["lo"])
+        self.assertIsNone(r["hi"])
+        self.assertEqual(r["note"], "insufficient_decided_pairs")
+        self.assertEqual(r["distinct_resamples"], stats._distinct_resamples(1))
+
+    def test_ci_floor_keyed_on_decided_six_of_twelve(self):
+        # 12 judged = 6 ties + 5 wins + 1 loss -- decided=6, still < 10, so
+        # no CI-backed accept should be possible even though n=12 alone
+        # would have cleared the old (wrong) floor.
+        grades = ([_grade(i, verdict="tie") for i in range(6)]
+                  + [_grade(i, verdict=ARM_TREATMENT) for i in range(6, 11)]
+                  + [_grade(11, verdict=ARM_CONTROL)])
+        r = stats.win_rate(grades, iters=500, seed=0)
+        self.assertEqual(r["n"], 12)
+        self.assertEqual(r["wins"], 5)
+        self.assertEqual(r["losses"], 1)
+        self.assertAlmostEqual(r["rate"], 5 / 6)
+        self.assertIsNone(r["lo"])
+        self.assertEqual(r["note"], "insufficient_decided_pairs")
+
+    def test_all_ties_reports_no_decided_pairs_regardless_of_n(self):
+        # fix-round-2 review, Minor #6 (fixed as a side effect of Important
+        # #1): an all-ties result should read "no_decided_pairs" at ANY n,
+        # not "insufficient_samples" below the old n-keyed floor.
+        grades = [_grade(i, verdict="tie") for i in range(3)]
+        r = stats.win_rate(grades)
+        self.assertEqual(r["note"], "no_decided_pairs")
 
     def test_grades_without_judge_are_excluded(self):
         grades = [_grade(0, verdict=None, control_ok=False),
@@ -455,6 +495,32 @@ class SummarizeTest(unittest.TestCase):
         self.assertTrue(r["accepted"])
         self.assertEqual(r["directional"], "favorable")
 
+    def test_grade_missing_treatment_ok_key_is_dropped_not_counted_as_success(self):
+        # fix-round-2 review, Important #3: a grade dict missing
+        # "treatment_ok" entirely (only reachable via a hand-assembled
+        # dict -- types.make_grade always sets the key) must be DROPPED
+        # from pass_k's input, never defaulted to True. Three such grades
+        # with no key at all must NOT read as "3/3 succeeded".
+        g0 = _summarize_grade(0, wall_ms_control=100, wall_ms_treatment=90)
+        g1 = _summarize_grade(1, wall_ms_control=100, wall_ms_treatment=90)
+        g2 = _summarize_grade(2, wall_ms_control=100, wall_ms_treatment=90)
+        for g in (g0, g1, g2):
+            del g["treatment_ok"]
+
+        summary = stats.summarize([g0, g1, g2], primary_effect=EFFECT_WALL_MS, seed=0)
+        self.assertEqual(summary["pass_k"], stats.pass_k([]))  # not pass_k([True, True, True])
+        self.assertEqual(summary["pass_k"]["note"], "insufficient_samples")
+
+    def test_grade_missing_treatment_ok_key_mixed_with_present_ones(self):
+        g_missing = _summarize_grade(0, wall_ms_control=100, wall_ms_treatment=90)
+        del g_missing["treatment_ok"]
+        g_present = _summarize_grade(1, wall_ms_control=100, wall_ms_treatment=90,
+                                      treatment_ok=False)
+
+        summary = stats.summarize([g_missing, g_present], primary_effect=EFFECT_WALL_MS, seed=0)
+        # only the one grade with a real (False) treatment_ok counts
+        self.assertEqual(summary["pass_k"], stats.pass_k([False]))
+
 
 # --- gate -----------------------------------------------------------------
 
@@ -532,6 +598,23 @@ class GateTest(unittest.TestCase):
         r = stats.gate(s, max_token_regression=0.10)
         self.assertFalse(r["accepted"])
         self.assertTrue(any("total_tokens regressed" in reason for reason in r["reasons"]))
+
+    def test_unmeasured_total_tokens_fails_closed_not_open(self):
+        # fix-round-2 review, Important #2: an unmeasured total_tokens delta
+        # must not pass silently -- it downgrades the decision to
+        # provisional instead of letting the safety net fail open.
+        efficiency = _efficiency_stub()
+        del efficiency["total_tokens"]
+        s = {
+            "win_rate": _win_rate_stub(12, wins=10, losses=0, ties=2),
+            "regressions": [],
+            "efficiency": efficiency,
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertTrue(r["accepted"])  # nothing else here rejects it
+        self.assertTrue(r["provisional"])
+        self.assertTrue(any("regression threshold NOT checked" in reason for reason in r["reasons"]))
 
     def test_rejects_when_quality_regresses_at_n_ge_10(self):
         s = {
@@ -655,6 +738,10 @@ class GateTest(unittest.TestCase):
         }
         r = stats.gate(s)
         self.assertFalse(r["accepted"])
+        # provisional describes "this decision used the small-n no-CI
+        # zone", for accept AND reject alike -- report.py's PROVISIONAL
+        # badge state covers both "qualified accept" and "not confident
+        # enough to reject outright either" (see gate's docstring).
         self.assertTrue(r["provisional"])
 
     def test_n_5_to_9_rejects_when_primary_point_estimate_not_positive(self):
@@ -667,6 +754,127 @@ class GateTest(unittest.TestCase):
         r = stats.gate(s)
         self.assertFalse(r["accepted"])
         self.assertTrue(any("did not improve" in reason for reason in r["reasons"]))
+
+    # --- fix-round-2 review, Critical: a high-severity regression must veto
+    # `provisional` and force `directional` to "unfavorable", regardless of
+    # what the quality/efficiency signals say on their own. ---
+
+    def test_high_severity_regression_vetoes_provisional_and_directional(self):
+        # This is the exact scenario the review traced: n=6 judged pairs,
+        # zero losses (favorable quality), a positive primary-metric point
+        # estimate (favorable efficiency) -- both signals alone would say
+        # "provisional accept, favorable" -- but a high-severity regression
+        # (e.g. the treatment arm crashed on one repeat) must override both.
+        s = {
+            "win_rate": _win_rate_stub(6, wins=6, losses=0, ties=0),
+            "regressions": [make_regression(kind="session_status_error", severity="high",
+                                             detail="treatment session status is error")],
+            "efficiency": _efficiency_stub(n=6, mean=30.0, lo=None, hi=None),
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertFalse(r["accepted"])
+        self.assertFalse(r["provisional"])
+        self.assertEqual(r["directional"], "unfavorable")
+        self.assertTrue(any("vetoes any provisional accept" in reason for reason in r["reasons"]))
+
+    def test_high_severity_regression_forces_unfavorable_even_at_n_ge_10(self):
+        # Same override, but through the full-power n>=10 CI-backed accept
+        # path, to confirm the veto isn't specific to the 5-9 regime.
+        s = {
+            "win_rate": _win_rate_stub(12, wins=10, losses=0, ties=2),
+            "regressions": [make_regression(kind="span_error_new", severity="high",
+                                             detail="new error-status span in treatment")],
+            "efficiency": _efficiency_stub(),
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertFalse(r["accepted"])
+        self.assertFalse(r["provisional"])
+        self.assertEqual(r["directional"], "unfavorable")
+
+    def test_medium_severity_regression_does_not_trigger_the_veto(self):
+        # Sanity check: the veto is specific to "high" severity, not any
+        # regression at all -- a medium regression still rejects via its
+        # own path (spec: any listed regression severity check is separate
+        # from this override) but must not force directional/provisional.
+        s = {
+            "win_rate": _win_rate_stub(6, wins=6, losses=0, ties=0),
+            "regressions": [make_regression(kind="duplicate_call_new", severity="medium",
+                                             detail="a duplicate call")],
+            "efficiency": _efficiency_stub(n=6, mean=30.0, lo=None, hi=None),
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertTrue(r["accepted"])
+        self.assertTrue(r["provisional"])
+        self.assertEqual(r["directional"], "favorable")
+
+    # --- fix-round-2 review, Important #4: lower_is_better must be honored,
+    # not hard-coded to "positive delta == improvement". ---
+
+    def _higher_is_better_efficiency(self, mean, lo=None, hi=None, n=6):
+        return {
+            "success_rate": {
+                "lower_is_better": False, "n": n,
+                "control_median": 0.80, "treatment_median": 0.90,
+                "abs_delta": -0.10, "pct_delta": -0.125,
+                "bootstrap": {"mean": mean, "lo": lo, "hi": hi, "level": 0.95, "n": n, "note": None},
+            },
+            "total_tokens": _efficiency_stub()["total_tokens"],
+        }
+
+    def test_higher_is_better_metric_with_negative_delta_is_improvement(self):
+        # delta convention is control - treatment; treatment's success rate
+        # went UP (0.80 -> 0.90), so delta = -0.10 -- a NEGATIVE point
+        # estimate that is nonetheless an improvement for a
+        # higher-is-better metric. The naive "positive == improved" would
+        # reject this; honoring lower_is_better=False must accept it.
+        s = {
+            "win_rate": _win_rate_stub(6, wins=6, losses=0, ties=0),
+            "regressions": [],
+            "efficiency": self._higher_is_better_efficiency(mean=-0.10),
+            "primary_effect": "does_not_matter_here",
+        }
+        # gate() maps primary_effect -> EFFICIENCY_METRICS name; since
+        # "success_rate" isn't in EFFECT_TO_EFFICIENCY_METRIC, drive this
+        # through _directional directly (the other half of Important #4)
+        # and through gate's point-estimate branch via a stubbed primary_metric.
+        primary_entry = s["efficiency"]["success_rate"]
+        directional = stats._directional(s["win_rate"], primary_entry)
+        self.assertEqual(directional, "favorable")
+
+    def test_higher_is_better_metric_with_positive_delta_is_a_regression(self):
+        # Mirror case: treatment's success rate went DOWN, delta = +0.10
+        # (positive), which would read as "improved" under the naive
+        # positive-only rule but is actually a regression here.
+        primary_entry = self._higher_is_better_efficiency(mean=0.10)["success_rate"]
+        sign = stats._point_improvement_sign(0.10, lower_is_better=False)
+        self.assertEqual(sign, -1)
+        directional = stats._directional(_win_rate_stub(6, wins=0, losses=6, ties=0), primary_entry)
+        self.assertEqual(directional, "unfavorable")
+
+    def test_point_improvement_sign_lower_is_better_true_unchanged(self):
+        self.assertEqual(stats._point_improvement_sign(5.0, lower_is_better=True), 1)
+        self.assertEqual(stats._point_improvement_sign(-5.0, lower_is_better=True), -1)
+        self.assertEqual(stats._point_improvement_sign(0.0, lower_is_better=True), 0)
+        self.assertEqual(stats._point_improvement_sign(None, lower_is_better=True), 0)
+
+    # --- fix-round-2 review, Minor #5: a bootstrap dict missing "n" must
+    # fail the primary-metric check, not silently take the weaker branch. ---
+
+    def test_primary_bootstrap_missing_n_key_fails_not_weakens(self):
+        efficiency = _efficiency_stub(mean=50.0, lo=-100.0, hi=100.0)  # CI spans zero
+        del efficiency["wall_ms"]["bootstrap"]["n"]
+        s = {
+            "win_rate": _win_rate_stub(12, wins=10, losses=0, ties=2),
+            "regressions": [],
+            "efficiency": efficiency,
+            "primary_effect": EFFECT_WALL_MS,
+        }
+        r = stats.gate(s)
+        self.assertFalse(r["accepted"])
+        self.assertTrue(any("missing sample size" in reason for reason in r["reasons"]))
 
 
 if __name__ == "__main__":
