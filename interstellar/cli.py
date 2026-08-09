@@ -256,13 +256,20 @@ def _resolve_baseline_home(trace, override):
     """Where to snapshot the baseline harness from: an explicit override,
     else the trace's own recorded home (derived from its session_dir --
     `<home>/sessions/<cwd-encoded>/<session-uuid>`, so the home is three
-    parents up), else the live `~/.grok`. Returns (path, description)."""
+    parents up), else the live `~/.grok`. Returns (path, description).
+
+    Always resolved to an absolute path: this home ultimately becomes a
+    `GROK_HOME` env value handed to a grok-dev subprocess, and grok
+    resolves a relative `GROK_HOME` against ITS OWN cwd, not this
+    process's -- a relative path here reads back as a broken/empty home
+    (misreported as "not signed in"), not the path bug it actually is."""
     if override is not None:
-        return Path(override), f"--grok-home override ({override})"
+        resolved = Path(override).resolve()
+        return resolved, f"--grok-home override ({resolved})"
 
     session_dir = (trace.get("session") or {}).get("session_dir")
     if session_dir:
-        candidate = Path(session_dir).parent.parent.parent
+        candidate = Path(session_dir).parent.parent.parent.resolve()
         if (candidate / "skills").is_dir() and (candidate / "config.toml").is_file():
             return candidate, f"trace's recorded session_dir ancestor ({candidate})"
 
@@ -740,12 +747,28 @@ def _run_preflight(baseline_version, *, out_dir, auth_from, model, timeout, runn
     not the real one: `harness.materialize` can append a warning in place
     (e.g. "project skill not materialized" when no `project_dest` is given,
     which this throwaway connectivity check has no use for and no business
-    leaking into the real cycle's report caveats)."""
+    leaking into the real cycle's report caveats).
+
+    Asserts the `GROK_HOME` it is about to hand to `runner` is absolute
+    before making the call: grok resolves a relative `GROK_HOME` against
+    ITS OWN cwd, not this process's, so a relative path here would silently
+    point at an empty/nonexistent home and come back reading as "not
+    signed in" -- a path bug in the caller, misdiagnosed as an auth
+    failure. The whole point of a preflight is a diagnosis worth trusting;
+    this must raise as the internal bug it is, not surface as a confusing,
+    wrong auth error."""
     probe_version = dict(baseline_version)
     probe_version["warnings"] = list(baseline_version.get("warnings") or [])
     home = harness.materialize(
         probe_version, Path(out_dir) / "scratch" / "preflight-home",
         auth_from=auth_from)
+    if not Path(home).is_absolute():
+        raise RuntimeError(
+            f"internal error: preflight GROK_HOME is not absolute ({home!r}) "
+            "-- this is a path bug in the caller (out_dir was not resolved "
+            "to an absolute path before reaching _run_preflight), not an "
+            "auth problem. Fix the caller; do not chase this as a login issue."
+        )
 
     argv = [str(replay.GROK), "-p", _preflight_prompt(),
             "--output-format", "json", "--permission-mode", "bypassPermissions"]
@@ -804,12 +827,25 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
     process or call a model has an injection point (defaulting to the real
     implementation) so tests can exercise the whole orchestration without
     ever spawning grok-dev, per the project's global test constraint."""
-    trace_path = Path(trace_path)
-    out_dir = Path(out_dir)
-    repo_root = Path(repo_root) if repo_root else REPO_ROOT
+    # Resolved to absolute here, at the top, before anything downstream
+    # derives a path from them: `out_dir` in particular ends up inside a
+    # `GROK_HOME` handed to a grok-dev subprocess (via `_run_preflight` and
+    # `replay.run_matrix`'s materialize calls), and grok resolves a
+    # relative `GROK_HOME` against ITS OWN cwd, not this process's -- a
+    # relative `--out` would silently point grok at an empty/nonexistent
+    # home and misreport a path bug as "not signed in". Every home,
+    # workdir, scratch, and report path built from `out_dir` below is
+    # absolute by construction as a result. `cmd_review` also resolves
+    # `--out`/`--grok-home` at parse time so this is defense in depth, not
+    # the only place it happens -- a direct `run_review(...)` caller (e.g.
+    # a test) gets the same guarantee without going through argparse.
+    trace_path = Path(trace_path).resolve()
+    out_dir = Path(out_dir).resolve()
+    repo_root = Path(repo_root).resolve() if repo_root else REPO_ROOT
     now = now or (lambda: datetime.now(timezone.utc))
     runner = runner or subprocess.run
-    real_grok_home = Path(auth_from) if auth_from else (Path.home() / ".grok")
+    real_grok_home = (Path(auth_from).resolve() if auth_from
+                      else (Path.home() / ".grok"))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     progress_path = out_dir / "progress.json"
@@ -1080,10 +1116,14 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
 # --------------------------------------------------------------------------
 
 def _resolve_trace_paths(patterns):
+    """Resolved to absolute at argument-parse time, same reasoning as
+    `--out`/`--grok-home` (see `run_review`'s top and `cmd_review`): every
+    user-supplied path this CLI touches becomes absolute before anything
+    downstream derives another path from it."""
     paths = []
     for pattern in patterns:
         if any(ch in pattern for ch in "*?["):
-            matches = sorted(Path(p) for p in glob.glob(pattern))
+            matches = sorted(Path(p).resolve() for p in glob.glob(pattern))
             if not matches:
                 raise SystemExit(f"error: no files matched {pattern!r}")
             paths.extend(matches)
@@ -1091,7 +1131,7 @@ def _resolve_trace_paths(patterns):
             p = Path(pattern)
             if not p.is_file():
                 raise SystemExit(f"error: trace file not found: {p}")
-            paths.append(p)
+            paths.append(p.resolve())
     return paths
 
 
@@ -1154,6 +1194,18 @@ def build_arg_parser():
 
 
 def cmd_review(args):
+    # Every user-supplied path is resolved to absolute right here, at
+    # argument-parse time, before anything derives another path from it --
+    # `run_review` resolves them again defensively (a direct caller doesn't
+    # go through this function), but the CLI's own `--out`/`--grok-home`
+    # must never reach it relative in the first place. A relative `--out`
+    # (the default shape, `runs/<timestamp>`, is itself relative) ends up
+    # inside a `GROK_HOME` handed to a grok-dev subprocess; grok resolves a
+    # relative `GROK_HOME` against ITS OWN cwd, not this process's, so this
+    # is a correctness bug, not a style preference -- see `_run_preflight`
+    # and `run_review`'s docstring comment for the failure mode this
+    # produces if it slips through (a path bug misreported as "not signed
+    # in").
     trace_paths = _resolve_trace_paths(args.trace)
     if len(trace_paths) != 1:
         raise SystemExit(
@@ -1161,7 +1213,8 @@ def cmd_review(args):
             f"{len(trace_paths)} file(s) matched: "
             + ", ".join(str(p) for p in trace_paths)
         )
-    out_dir = args.out or (Path("runs") / _timestamp())
+    out_dir = (args.out or (Path("runs") / _timestamp())).resolve()
+    grok_home = args.grok_home.resolve() if args.grok_home else None
 
     run_review(
         trace_paths[0], out_dir=out_dir, k=args.k, max_patches=args.max_patches,
@@ -1169,7 +1222,7 @@ def cmd_review(args):
         dry_run=args.dry_run, serve=args.serve, port=args.port, model=args.model,
         max_parallel=args.max_parallel, timeout=args.timeout, seed=args.seed,
         max_token_regression=args.max_token_regression,
-        grok_home_override=args.grok_home, no_preflight=args.no_preflight,
+        grok_home_override=grok_home, no_preflight=args.no_preflight,
     )
     return 0
 

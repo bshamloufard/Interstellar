@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -116,6 +117,37 @@ class ArgParsingTests(unittest.TestCase):
         _, kwargs = fake_run.call_args
         self.assertTrue(kwargs["dry_run"])
 
+    def test_relative_out_and_grok_home_are_resolved_to_absolute(self):
+        # Regression: a relative --out (the default shape, runs/<ts>, IS
+        # relative) used to reach _run_preflight as a relative GROK_HOME;
+        # grok resolves that against ITS OWN cwd and reports a plain path
+        # bug as "not signed in". Every user path must be absolute by the
+        # time it leaves argument parsing.
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td).resolve()
+            trace_file = td_path / "trace.json"
+            trace_file.write_text("{}")
+            grok_home_dir = td_path / "some_home"
+            grok_home_dir.mkdir()
+
+            cwd = os.getcwd()
+            os.chdir(td_path)
+            try:
+                with mock.patch.object(cli, "run_review") as fake_run:
+                    fake_run.return_value = {"ok": True}
+                    cli.main(["review", "trace.json", "--dry-run",
+                             "--out", "relative_out", "--grok-home", "some_home"])
+            finally:
+                os.chdir(cwd)
+
+        args, kwargs = fake_run.call_args
+        self.assertTrue(Path(args[0]).is_absolute())
+        self.assertEqual(args[0], trace_file)
+        self.assertTrue(kwargs["out_dir"].is_absolute())
+        self.assertEqual(kwargs["out_dir"], td_path / "relative_out")
+        self.assertTrue(kwargs["grok_home_override"].is_absolute())
+        self.assertEqual(kwargs["grok_home_override"], grok_home_dir)
+
 
 class ResolveTracePathsTests(unittest.TestCase):
     def test_literal_path_must_exist(self):
@@ -184,7 +216,11 @@ class ResolveBaselineHomeTests(unittest.TestCase):
             session_dir.mkdir(parents=True)
             home, source = cli._resolve_baseline_home(
                 {"session": {"session_dir": str(session_dir)}}, None)
-        self.assertEqual(home, fake_home)
+        # .resolve()d (e.g. macOS's /tmp -> /private/tmp), not just
+        # string-equal to the unresolved fixture path -- see the module
+        # docstring note on why every path here must end up absolute.
+        self.assertEqual(home, fake_home.resolve())
+        self.assertTrue(home.is_absolute())
         self.assertIn("recorded session_dir", source)
 
 
@@ -747,6 +783,32 @@ class ProgressJournalTests(unittest.TestCase):
         self.assertEqual(progress["status"], "planned")
         self.assertNotIn("completed_patches", progress)
         self.assertFalse((self.out_dir / "report.json").exists())
+
+    def test_relative_out_dir_still_produces_absolute_grok_home_for_the_runner(self):
+        # The exact regression: a relative out_dir used to reach the runner
+        # as a relative GROK_HOME (grok resolves that against ITS OWN cwd,
+        # not this process's, and reports "not signed in" for what is
+        # actually a path bug). Drives run_review directly with a relative
+        # out_dir string, from a chdir'd cwd, and checks every GROK_HOME
+        # the runner actually received -- preflight's call included.
+        seen_homes = []
+
+        def recording_runner(argv, **kwargs):
+            seen_homes.append((kwargs.get("env") or {}).get("GROK_HOME"))
+            return _fake_runner(argv, **kwargs)
+
+        cwd = os.getcwd()
+        os.chdir(self.out_dir.parent)  # self.out_dir doesn't exist yet
+        try:
+            self._run(out_dir=Path(self.out_dir.name), runner=recording_runner)
+        finally:
+            os.chdir(cwd)
+
+        self.assertGreater(len(seen_homes), 0)
+        for home in seen_homes:
+            self.assertIsNotNone(home)
+            self.assertTrue(Path(home).is_absolute(),
+                            f"GROK_HOME {home!r} handed to the runner was relative")
 
     def test_no_preflight_flag_skips_the_check(self):
         # Fails only when routed through the preflight-only materialized

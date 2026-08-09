@@ -385,7 +385,13 @@ def materialize(version, dest: Path, *, auth_from: Path, seal: bool = True,
     warning names them -- never written into the GROK_HOME tier where the
     caller would believe, wrongly, that they took effect.
     """
-    dest = Path(dest)
+    # Resolved to absolute here, once, for every caller: grok resolves a
+    # relative GROK_HOME against its OWN cwd (the run's workdir in a replay,
+    # not wherever this tool was invoked from), so a relative dest silently
+    # points grok at an empty home instead of this one and it reports
+    # "Not signed in" instead of finding auth.json. This is the backstop --
+    # every home path in the system originates here.
+    dest = Path(dest).resolve()
     dest.mkdir(parents=True, exist_ok=True)
 
     user_skills = [s for s in version["skills"] if s["scope"] != "project"]

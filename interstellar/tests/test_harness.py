@@ -343,7 +343,13 @@ class MaterializeTests(unittest.TestCase):
             # below, this test is about the general copy semantics.
             result = harness.materialize(version, dest, auth_from=auth_dir, seal=False)
 
-            self.assertEqual(result, dest)
+            # materialize resolves dest to an absolute path (see
+            # test_materialize_resolves_relative_dest_to_absolute below), so
+            # compare against dest.resolve() rather than dest itself -- on
+            # macOS /var is itself a symlink to /private/var, so a tempdir
+            # path and its resolved form are not always textually equal.
+            self.assertEqual(result, dest.resolve())
+            self.assertTrue(result.is_absolute())
             self.assertEqual(
                 {p.name for p in (dest / "skills").iterdir()}, {"alpha", "beta"}
             )
@@ -353,6 +359,32 @@ class MaterializeTests(unittest.TestCase):
             self.assertEqual((dest / "config.toml").read_text(), CONFIG_TEXT)
             self.assertEqual((dest / "auth.json").read_text(), '{"token": "fake"}')
             self.assertTrue((dest / "sessions").is_dir())
+
+    def test_materialize_resolves_relative_dest_to_absolute(self):
+        # grok resolves a relative GROK_HOME against its OWN cwd (the run's
+        # workdir in a replay, not wherever this tool was invoked from), so a
+        # relative dest silently points grok at the wrong, empty home. This
+        # regression test is the exact failure mode from two live 18-run
+        # cycles: caller passes a relative path, cwd is not what grok will
+        # use, and the home materialize() built is never the one grok reads.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()  # canonicalize once, for comparison
+            auth_dir = self._auth_dir(tmp)
+            version = _version([_skill("alpha", TEN_LINES)])
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                result = harness.materialize(
+                    version, "relative_home", auth_from=auth_dir,
+                )
+            finally:
+                os.chdir(cwd)
+
+            self.assertTrue(result.is_absolute())
+            self.assertEqual(result, tmp / "relative_home")
+            # the home was actually created where the caller meant, not
+            # relative to whatever the process cwd is by the time it's read
+            self.assertTrue((tmp / "relative_home" / "skills" / "alpha").is_dir())
 
     def test_rematerialize_drops_stale_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
