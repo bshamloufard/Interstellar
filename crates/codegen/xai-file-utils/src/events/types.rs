@@ -465,6 +465,33 @@ pub enum Event {
         server_name: String,
         enabled: bool,
     },
+    /// A skill was activated in this session (slash command, SKILL.md read, or
+    /// skill tool). Complements OTEL `SkillDispatched` / `grok_code.skill_activated`
+    /// so local `events.jsonl` can join skill usage the same way tools do.
+    SkillActivated {
+        skill_name: String,
+        trigger: SkillTrigger,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        plugin_source: Option<String>,
+        /// When the activation is backed by a tool call (`skill_md_read` →
+        /// `read_file`, or `skill_tool`), the model/ACP tool call id for join
+        /// with `tool_completed` / `updates.jsonl`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        related_tool_call_id: Option<String>,
+    },
+}
+
+/// How a skill was activated. Wire labels match OTEL `SkillTrigger`
+/// (`slash_command` | `skill_md_read` | `skill_tool`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillTrigger {
+    /// The user ran `/skill-name`, at turn start or mid-turn.
+    SlashCommand,
+    /// The model read the skill's `SKILL.md` with `read_file`.
+    SkillMdRead,
+    /// The model called the skill tool (vendor-compat toolsets).
+    SkillTool,
 }
 
 /// Who emitted a [`Event::ToolCompleted`] row.
@@ -904,5 +931,44 @@ mod tests {
         assert_eq!(obj["type"], "goal_role_model_fail_open");
         assert_eq!(obj["role"], "strategist");
         assert_eq!(obj["reason"], "model_unauthorized");
+    }
+
+    #[test]
+    fn skill_activated_serializes_core_fields_and_omits_optionals() {
+        let local = serde_json::to_value(Event::SkillActivated {
+            skill_name: "review".into(),
+            trigger: SkillTrigger::SlashCommand,
+            plugin_source: None,
+            related_tool_call_id: None,
+        })
+        .unwrap();
+        assert_eq!(local["type"], "skill_activated");
+        assert_eq!(local["skill_name"], "review");
+        assert_eq!(local["trigger"], "slash_command");
+        assert!(local.get("plugin_source").is_none());
+        assert!(local.get("related_tool_call_id").is_none());
+
+        let tool_backed = serde_json::to_value(Event::SkillActivated {
+            skill_name: "create-skill".into(),
+            trigger: SkillTrigger::SkillMdRead,
+            plugin_source: Some("marketplace".into()),
+            related_tool_call_id: Some("call_abc".into()),
+        })
+        .unwrap();
+        assert_eq!(tool_backed["trigger"], "skill_md_read");
+        assert_eq!(tool_backed["plugin_source"], "marketplace");
+        assert_eq!(tool_backed["related_tool_call_id"], "call_abc");
+    }
+
+    #[test]
+    fn skill_trigger_serializes_snake_case() {
+        for (variant, expected) in [
+            (SkillTrigger::SlashCommand, "\"slash_command\""),
+            (SkillTrigger::SkillMdRead, "\"skill_md_read\""),
+            (SkillTrigger::SkillTool, "\"skill_tool\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected, "{variant:?} must serialize to {expected}");
+        }
     }
 }

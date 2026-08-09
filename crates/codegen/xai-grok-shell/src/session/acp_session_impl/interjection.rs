@@ -248,8 +248,8 @@ impl SessionActor {
         let parsed = slash_commands::parse_skill_references(text, &slash_skills, availability)?;
         // Deliberately lighter telemetry than turn start: no `skill.activated`
         // span, `PluginUsed`, or `active_skill` stamp — those attribute the
-        // turn, which this skill did not start. `SkillDispatched` still
-        // carries `plugin_source`, so dispatch counts stay complete.
+        // turn, which this skill did not start. Local + OTEL skill dispatch
+        // still runs so usage counts stay complete (`plugin_source` included).
         for sk in &parsed {
             xai_grok_telemetry::session_ctx::log_event(
                 xai_grok_telemetry::events::SlashCommandUsed {
@@ -257,12 +257,11 @@ impl SessionActor {
                     args_provided: !sk.args.is_empty(),
                 },
             );
-            xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::events::SkillDispatched {
-                    skill_name: sk.name.clone(),
-                    plugin_source: sk.plugin_name.clone(),
-                    trigger: xai_grok_telemetry::events::SkillTrigger::SlashCommand,
-                },
+            self.record_skill_activation(
+                sk.name.clone(),
+                sk.plugin_name.clone(),
+                crate::session::events::SkillTrigger::SlashCommand,
+                None,
             );
         }
         slash_commands::build_skill_information_for_refs(

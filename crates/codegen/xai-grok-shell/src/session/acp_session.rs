@@ -1143,6 +1143,41 @@ impl SessionActor {
     fn emit_event(&self, event: crate::session::events::Event) {
         self.events.emit(event);
     }
+
+    /// Record a skill activation to local session artifacts (`events.jsonl` +
+    /// `signals.json`) and OTEL (`SkillDispatched`). Call sites keep their own
+    /// tracing spans / `PluginUsed` / active-skill stamps when those apply.
+    pub(crate) fn record_skill_activation(
+        &self,
+        skill_name: String,
+        plugin_source: Option<String>,
+        trigger: crate::session::events::SkillTrigger,
+        related_tool_call_id: Option<String>,
+    ) {
+        let telemetry_trigger = match trigger {
+            crate::session::events::SkillTrigger::SlashCommand => {
+                xai_grok_telemetry::events::SkillTrigger::SlashCommand
+            }
+            crate::session::events::SkillTrigger::SkillMdRead => {
+                xai_grok_telemetry::events::SkillTrigger::SkillMdRead
+            }
+            crate::session::events::SkillTrigger::SkillTool => {
+                xai_grok_telemetry::events::SkillTrigger::SkillTool
+            }
+        };
+        xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SkillDispatched {
+            skill_name: skill_name.clone(),
+            plugin_source: plugin_source.clone(),
+            trigger: telemetry_trigger,
+        });
+        self.emit_event(crate::session::events::Event::SkillActivated {
+            skill_name: skill_name.clone(),
+            trigger,
+            plugin_source,
+            related_tool_call_id,
+        });
+        self.signals_handle().record_skill_activation(skill_name);
+    }
     fn emit_turn_ended(
         &self,
         outcome: crate::session::events::TurnOutcomeLabel,

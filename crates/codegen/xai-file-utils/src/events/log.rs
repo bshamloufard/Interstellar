@@ -91,7 +91,8 @@ impl std::fmt::Debug for EventWriter {
 mod tests {
     use super::*;
     use crate::events::types::{
-        EVENT_SCHEMA_VERSION, Event, SessionRelationship, ToolOutcome, TurnOutcomeLabel,
+        EVENT_SCHEMA_VERSION, Event, SessionRelationship, SkillTrigger, ToolOutcome,
+        TurnOutcomeLabel,
     };
 
     fn _assert_event_writer_is_send_sync_clone()
@@ -123,6 +124,12 @@ mod tests {
             tool_call_id: "call_xyz".into(),
             source: crate::events::types::ToolCompletedSource::Shell,
         });
+        writer.emit(Event::SkillActivated {
+            skill_name: "review".into(),
+            trigger: SkillTrigger::SlashCommand,
+            plugin_source: None,
+            related_tool_call_id: None,
+        });
         writer.emit(Event::TurnEnded {
             outcome: TurnOutcomeLabel::Completed,
             cancellation_category: None,
@@ -131,7 +138,7 @@ mod tests {
 
         let text = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
         let lines: Vec<&str> = text.trim().split('\n').collect();
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 5);
 
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(first["type"], "turn_started");
@@ -151,7 +158,14 @@ mod tests {
             "shell ToolCompleted must omit source"
         );
 
-        let fourth: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+        let skill: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+        assert_eq!(skill["type"], "skill_activated");
+        assert_eq!(skill["skill_name"], "review");
+        assert_eq!(skill["trigger"], "slash_command");
+        assert!(skill.get("plugin_source").is_none());
+        assert!(skill["ts"].as_str().is_some());
+
+        let fourth: serde_json::Value = serde_json::from_str(lines[4]).unwrap();
         assert_eq!(fourth["type"], "turn_ended");
         assert_eq!(fourth["outcome"], "completed");
         assert!(fourth.get("cancellation_category").is_none());

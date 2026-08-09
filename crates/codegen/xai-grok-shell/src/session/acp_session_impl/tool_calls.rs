@@ -1702,7 +1702,7 @@ impl SessionActor {
             ),
             ToolInput::ReadFile(read_file) => {
                 if let Some(skill) = self.skill_for_read_path(&read_file.path).await {
-                    self.emit_skill_md_read(skill);
+                    self.emit_skill_md_read(skill, Some(tool_call_id.to_string()));
                 }
                 (
                     format!("Read `{}`", read_file.path),
@@ -1794,19 +1794,18 @@ impl SessionActor {
                 vec![],
             ),
             ToolInput::Skill(skill) => {
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::SkillDispatched {
-                        skill_name: skill.skill.clone(),
-                        plugin_source: None,
-                        trigger: xai_grok_telemetry::events::SkillTrigger::SkillTool,
-                    },
-                );
                 tracing::info_span!(
                     "skill.activated",
                     skill_name = %skill.skill,
                     invocation_trigger = "skill_tool",
                 )
                 .in_scope(|| {});
+                self.record_skill_activation(
+                    skill.skill.clone(),
+                    None,
+                    crate::session::events::SkillTrigger::SkillTool,
+                    Some(tool_call_id.to_string()),
+                );
                 (
                     format!("Skill: {}", skill.skill),
                     acp::ToolKind::Other,
@@ -2023,7 +2022,11 @@ impl SessionActor {
                 crate::session::telemetry::is_same_skill_file(Path::new(&skill.path), &read_path)
             })
     }
-    fn emit_skill_md_read(&self, skill: xai_grok_tools::implementations::skills::types::SkillInfo) {
+    fn emit_skill_md_read(
+        &self,
+        skill: xai_grok_tools::implementations::skills::types::SkillInfo,
+        related_tool_call_id: Option<String>,
+    ) {
         let skill_source = if skill.plugin_name.is_some() {
             "plugin"
         } else {
@@ -2039,11 +2042,12 @@ impl SessionActor {
             skill_source = skill_source,
         )
         .in_scope(|| {});
-        xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SkillDispatched {
-            skill_name: skill.name,
-            plugin_source: skill.plugin_name,
-            trigger: xai_grok_telemetry::events::SkillTrigger::SkillMdRead,
-        });
+        self.record_skill_activation(
+            skill.name,
+            skill.plugin_name,
+            crate::session::events::SkillTrigger::SkillMdRead,
+            related_tool_call_id,
+        );
     }
     async fn handle_tool_parse_error(
         &self,

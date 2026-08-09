@@ -269,6 +269,14 @@ pub struct SessionSignals {
     #[serde(default)]
     pub tools_used: Vec<String>,
 
+    // === Skill Usage ===
+    /// Number of skill activations (slash / SKILL.md read / skill tool)
+    #[serde(default)]
+    pub skill_call_count: u32,
+    /// Distinct skills that have been activated in this session
+    #[serde(default)]
+    pub skills_used: Vec<String>,
+
     // === Model Usage ===
     /// Distinct models that have been used in this session
     #[serde(default)]
@@ -463,6 +471,8 @@ pub enum SignalEvent {
         tool_call_id: String,
         duration_ms: u64,
     },
+    /// Record a skill activation with the skill name.
+    RecordSkillActivation(String),
 
     // === Error Events ===
     /// Record a general error (sampling, network, etc.)
@@ -682,6 +692,13 @@ impl SessionSignalsHandle {
             tool_call_id: tool_call_id.into(),
             duration_ms,
         });
+    }
+
+    /// Record a skill activation (slash command, SKILL.md read, or skill tool).
+    pub(crate) fn record_skill_activation(&self, skill_name: impl Into<String>) {
+        let _ = self
+            .tx
+            .send(SignalEvent::RecordSkillActivation(skill_name.into()));
     }
 
     /// Record a bare echo/printf command for telemetry.
@@ -1016,6 +1033,8 @@ pub struct SessionSignalsActor {
     signals: SessionSignals,
     /// Set of distinct tools used (for deduplication)
     tools_set: HashSet<String>,
+    /// Set of distinct skills activated (for deduplication)
+    skills_set: HashSet<String>,
     /// Set of distinct models used (for deduplication)
     models_set: HashSet<String>,
     /// Session start time (for calculating duration)
@@ -1138,6 +1157,7 @@ impl SessionSignalsActor {
             rx,
             signals: SessionSignals::default(),
             tools_set: HashSet::new(),
+            skills_set: HashSet::new(),
             models_set: HashSet::new(),
             session_start: Instant::now(),
             last_sync: None,
@@ -1258,6 +1278,12 @@ impl SessionSignalsActor {
                         .entry(tool_name)
                         .or_insert((0, 0));
                     entry.1 += 1;
+                }
+                SignalEvent::RecordSkillActivation(skill_name) => {
+                    self.signals.skill_call_count += 1;
+                    if self.skills_set.insert(skill_name.clone()) {
+                        self.signals.skills_used.push(skill_name);
+                    }
                 }
                 SignalEvent::RecordToolDuration {
                     tool_name,
@@ -1618,6 +1644,7 @@ impl SessionSignalsActor {
                 SignalEvent::RestoreSignals(mut restored) => {
                     // Rebuild dedup sets from the restored signals
                     self.tools_set = restored.tools_used.iter().cloned().collect();
+                    self.skills_set = restored.skills_used.iter().cloned().collect();
                     self.models_set = restored.models_used.iter().cloned().collect();
 
                     // TDigest is not serializable, so it will be None after
@@ -1910,6 +1937,43 @@ mod tests {
         assert_eq!(snapshot.tools_used.len(), 2); // Only unique tools
 
         // Shutdown
+        handle.shutdown();
+        actor_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_skill_activation_counts_and_dedupes() {
+        let (handle, actor) = SessionSignalsActor::new();
+        let actor_handle = tokio::spawn(actor.run());
+
+        handle.record_skill_activation("review");
+        handle.record_skill_activation("create-skill");
+        handle.record_skill_activation("review"); // duplicate name
+
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.skill_call_count, 3);
+        assert_eq!(snapshot.skills_used.len(), 2);
+        assert!(snapshot.skills_used.contains(&"review".to_string()));
+        assert!(snapshot.skills_used.contains(&"create-skill".to_string()));
+
+        // Full restore must keep skill counters and continue deduping names.
+        handle.restore_signals(snapshot.clone());
+        handle.record_skill_activation("review"); // existing name
+        handle.record_skill_activation("imagine"); // new name
+
+        let after = handle.snapshot().await.unwrap();
+        assert_eq!(after.skill_call_count, 5); // restored 3 + 2 activations
+        assert_eq!(after.skills_used.len(), 3);
+        assert!(after.skills_used.contains(&"imagine".to_string()));
+
+        // Serde wire form matches toolsUsed style.
+        let json = serde_json::to_value(&after).unwrap();
+        assert_eq!(json["skillCallCount"], 5);
+        assert_eq!(
+            json["skillsUsed"].as_array().map(|a| a.len()),
+            Some(3)
+        );
+
         handle.shutdown();
         actor_handle.await.unwrap();
     }

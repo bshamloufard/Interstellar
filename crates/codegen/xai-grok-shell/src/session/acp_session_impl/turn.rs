@@ -420,12 +420,11 @@ impl SessionActor {
                             args_provided: !sk.args.is_empty(),
                         },
                     );
-                    xai_grok_telemetry::session_ctx::log_event(
-                        xai_grok_telemetry::events::SkillDispatched {
-                            skill_name: sk.name.clone(),
-                            plugin_source: sk.plugin_name.clone(),
-                            trigger: xai_grok_telemetry::events::SkillTrigger::SlashCommand,
-                        },
+                    self.record_skill_activation(
+                        sk.name.clone(),
+                        sk.plugin_name.clone(),
+                        crate::session::events::SkillTrigger::SlashCommand,
+                        None,
                     );
                     let skill_source = if sk.plugin_name.is_some() {
                         "plugin"
