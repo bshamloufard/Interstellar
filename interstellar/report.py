@@ -1756,12 +1756,26 @@ tr.no-data td { color: var(--faint); font-style: italic; }
 #
 # The one piece of real interactivity this page has is Task 2's run panel:
 # POST /run to start a cycle, poll GET /status to reflect it live, reload
-# on completion. Both endpoints are only served over the loopback-only
-# server (see make_server) -- opening index.html directly (file://, or a
-# copy someone emails around) just shows "failed to start" on click, never
-# a broken page. No external script/resource is ever referenced (the
-# self-contained-page test asserts this), and nothing here reads or writes
+# on completion so the reloaded page shows the new recommendations/diffs/
+# gate verdicts -- never left stale on "running" or on the pre-run cards.
+# Both endpoints are only served over the loopback-only server (see
+# make_server) -- opening index.html directly (file://, or a copy someone
+# emails around) just shows "failed to start" on click, never a broken
+# page. No external script/resource is ever referenced (the self-
+# contained-page test asserts this), and nothing here reads or writes
 # anything outside these two endpoints.
+#
+# PENDING_KEY (sessionStorage, this tab only) marks "a run was started
+# from THIS page load and hasn't been reloaded-for yet". Without it, the
+# server's /status keeps reporting the last run's outcome forever (it has
+# no concept of "already shown to the user") -- so the very reload this
+# code triggers on completion would load a fresh page whose first poll()
+# sees that same "done" status and reloads again, forever. PENDING_KEY is
+# cleared right before the reload, so the reloaded page's poll() sees
+# "done" with no pending flag and renders it as a settled, final state
+# instead of triggering another reload. It's also NOT set on ordinary page
+# load, so simply opening/refreshing a report that finished in a previous
+# session shows "up to date" immediately, with no surprise reload.
 _SCRIPT = """
 (function () {
   var panel = document.getElementById("run-panel");
@@ -1770,6 +1784,7 @@ _SCRIPT = """
   var kSelect = document.getElementById("run-k");
   if (!panel || !btn || !statusEl || !kSelect) return;
 
+  var PENDING_KEY = "interstellar-run-pending";
   var pollTimer = null;
 
   function fmtElapsed(s) {
@@ -1783,6 +1798,20 @@ _SCRIPT = """
     statusEl.textContent = text;
   }
 
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function isPending() {
+    try { return sessionStorage.getItem(PENDING_KEY) === "1"; } catch (e) { return false; }
+  }
+  function setPending(v) {
+    try {
+      if (v) sessionStorage.setItem(PENDING_KEY, "1");
+      else sessionStorage.removeItem(PENDING_KEY);
+    } catch (e) { /* sessionStorage unavailable -- degrade to no auto-reload loop guard */ }
+  }
+
   function poll() {
     fetch("/status", {cache: "no-store"}).then(function (r) {
       return r.json();
@@ -1792,11 +1821,25 @@ _SCRIPT = """
         setStatus("running", "running k=" + s.k + " \\u2014 " + fmtElapsed(s.elapsed_s) +
           " elapsed (a cycle can take several minutes and spends real API cost)");
       } else if (s.status === "done") {
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-        setStatus("done", "done in " + fmtElapsed(s.elapsed_s) + " \\u2014 reloading\\u2026");
-        setTimeout(function () { window.location.reload(); }, 800);
+        stopPolling();
+        btn.disabled = false;
+        if (isPending()) {
+          // This is OUR run finishing -- reload once to pick up the new
+          // recommendations/diffs/gate verdicts, then clear the flag so
+          // the reloaded page settles instead of reloading again.
+          setPending(false);
+          setStatus("done", "done in " + fmtElapsed(s.elapsed_s) +
+            " \\u2014 loading new recommendations\\u2026");
+          setTimeout(function () { window.location.reload(); }, 600);
+        } else {
+          // A finished run from before this page load (or the reload we
+          // already did) -- the page already reflects it; say so plainly
+          // rather than reloading again.
+          setStatus("done", "up to date \\u2014 last cycle finished in " + fmtElapsed(s.elapsed_s));
+        }
       } else if (s.status === "failed") {
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        stopPolling();
+        setPending(false);
         btn.disabled = false;
         setStatus("failed", "failed: " + (s.error || ("exit code " + s.returncode)));
       } else {
@@ -1810,6 +1853,7 @@ _SCRIPT = """
   }
 
   btn.addEventListener("click", function () {
+    setPending(true);
     btn.disabled = true;
     setStatus("running", "starting\\u2026");
     fetch("/run", {
@@ -1827,6 +1871,7 @@ _SCRIPT = """
       if (!pollTimer) pollTimer = setInterval(poll, 2000);
       poll();
     }).catch(function (err) {
+      setPending(false);
       btn.disabled = false;
       setStatus("failed", "failed to start: " + err.message);
     });
