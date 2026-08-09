@@ -27,8 +27,12 @@ has no external http(s) references; and serve() binds loopback only.
 
 from __future__ import annotations
 
+import http.client
 import json
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -54,6 +58,32 @@ SAMPLE_DIFF = """--- a/skills/verbose-skill/SKILL.md
 -This is a wordy paragraph that never gets used by the agent in practice.
 -Another wasted line kept here for historical reasons only.
 +Trimmed.
+"""
+
+# A del/add pair that's clearly "the same line, modified" (SequenceMatcher
+# ratio well above _CLOSE_MATCH_RATIO) -- the word-level highlighting test's
+# fixture. Only "typo" -> "typoo" differs.
+WORD_LEVEL_DIFF = """--- a/skills/typo-skill/SKILL.md
++++ b/skills/typo-skill/SKILL.md
+@@ -3,3 +3,3 @@
+ unchanged context line
+-This line has a small typo in it
++This line has a small typoo in it
+ trailing context line
+"""
+
+# Header claims a 60-line old-file span starting at line 66 (old_start=66,
+# old_count=60 -> old_end=125) -- the "removes N of M lines" fraction test
+# only needs the hunk header's arithmetic to be internally consistent, not
+# a literal 60-line diff body (see _truncate_fraction_text: numerator comes
+# from application["lines_changed"]/patch["line_ranges"], denominator from
+# the hunk header alone).
+FRACTION_DIFF = """--- a/skills/big-skill/SKILL.md
++++ b/skills/big-skill/SKILL.md
+@@ -66,60 +66,1 @@
+-first removed line of a long cut block
+-second removed line of a long cut block
++kept summary line
 """
 
 BASE_EFFICIENCY = {
@@ -98,7 +128,8 @@ def _synthetic_grades(n, *, skill_tokens_improvement=0, verdict="treatment",
     return grades
 
 
-def _patch_result(patch_id, target, grades, *, rationale, verdict_line, diff=SAMPLE_DIFF, applied=True):
+def _patch_result(patch_id, target, grades, *, rationale, verdict_line, diff=SAMPLE_DIFF,
+                   applied=True, line_ranges=None, lines_changed=None):
     """Builds a real make_patch_result() by calling stats.summarize() and
     stats.gate() on `grades` — the same call cli.py makes — instead of
     hand-assembling `statistics`/`gate`. `applied` and `diff` are
@@ -111,9 +142,11 @@ def _patch_result(patch_id, target, grades, *, rationale, verdict_line, diff=SAM
     patch = make_patch(
         patch_id=patch_id, kind=PATCH_SKILL_TRUNCATE, target=target,
         rationale=rationale, expected_effect=EFFECT_SKILL_TOKENS,
-        source_recommendation=f"rec-{patch_id}", diff=diff,
+        source_recommendation=f"rec-{patch_id}", diff=diff, line_ranges=line_ranges,
     )
-    application = make_patch_application(patch_id=patch_id, applied=applied, diff=diff, lines_changed=2 if diff else 0)
+    if lines_changed is None:
+        lines_changed = 2 if diff else 0
+    application = make_patch_application(patch_id=patch_id, applied=applied, diff=diff, lines_changed=lines_changed)
     n = len(grades)
     matrix_summary = {
         "prompt": "do the thing", "k": n, "patch_id": patch_id,
@@ -324,6 +357,30 @@ def _partial_failure_patch_result():
     )
 
 
+def _word_level_diff_patch_result():
+    """A close-matching del/add pair (see WORD_LEVEL_DIFF) -- exercises the
+    word-level highlighting path of the diff view."""
+    grades = _synthetic_grades(3, skill_tokens_improvement=50, verdict="tie", consistent=True)
+    return _patch_result(
+        "p16", "typo-skill", grades, diff=WORD_LEVEL_DIFF,
+        rationale="Fixes a typo the agent occasionally copies verbatim.",
+        verdict_line="Trivial one-word fix, too few repeats to say more.",
+    )
+
+
+def _truncate_fraction_patch_result():
+    """A skill.truncate patch whose line_ranges/lines_changed/diff hunk
+    header are consistent enough to exercise the "removes N of M lines"
+    fraction line end to end (see FRACTION_DIFF)."""
+    grades = _synthetic_grades(3, skill_tokens_improvement=200, verdict="tie", consistent=True)
+    return _patch_result(
+        "p15", "big-skill", grades, diff=FRACTION_DIFF,
+        line_ranges=[[66, 125]], lines_changed=60,
+        rationale="Trims a large dead block of duplicated guidance.",
+        verdict_line="Large truncation, small sample so far.",
+    )
+
+
 def _session():
     return {
         "session_id": "019fe438-a9e4-7f42-ab5a-3c715f066f87",
@@ -343,9 +400,13 @@ class BuildTests(unittest.TestCase):
             session=_session(), baseline_version=_baseline_version(),
             patch_results=[_accepted_patch_result()], k=12, cost_usd=1.2345,
         )
+        # build() adds "rerun" on top of make_report()'s frozen shape (Task
+        # 2's stored re-run config) -- report.json is this module's own
+        # artifact, not the types.py contract, so this is an intentional
+        # addition, not a drift bug. See build()'s docstring.
         expected_keys = set(make_report(
             session={}, baseline_version={}, patch_results=[], caveats=[],
-        ).keys())
+        ).keys()) | {"rerun"}
         self.assertEqual(set(rpt.keys()), expected_keys)
         self.assertEqual(rpt["k"], 12)
         self.assertAlmostEqual(rpt["cost_usd"], 1.2345)
@@ -959,7 +1020,11 @@ class FixRound3ReviewTests(unittest.TestCase):
         # deterministic, not cache-affected, per the team-lead's report
         self._build_and_write([pr], k=12)
         html_text = self._html()
-        rows = html_text.split("<tbody>")[1].split("</tbody>")[0].split("</tr>")
+        # Target the metrics table specifically -- the diff view (Task 1)
+        # renders its own <tbody> earlier in the page, so a bare first
+        # "<tbody>" match would grab diff rows instead of metric rows.
+        metrics_section = html_text.split('table class="metrics"')[1]
+        rows = metrics_section.split("<tbody>")[1].split("</tbody>")[0].split("</tr>")
         total_row = next(r for r in rows if "Total tokens" in r)
         cost_row = next(r for r in rows if "Cost (USD)" in r)
         target_row = next(r for r in rows if "Skill tokens (est.)" in r)
@@ -1039,10 +1104,16 @@ class FixRound3ReviewTests(unittest.TestCase):
         self.assertIn("[50.00, 50.00]", text)
         self.assertIn("degenerate", text)
 
-    def test_no_script_tag_in_output(self):
+    def test_no_external_script_reference_in_output(self):
+        # Task 2 gives the page real inline JS (the run-panel poller) --
+        # the page is no longer script-free, but it must still never
+        # reference an external script (a <script src="..."> would be a
+        # non-self-contained resource, exactly what the http(s)-reference
+        # test below also guards against from a different angle).
         self._build_and_write([_accepted_patch_result()], k=12)
         html_text = self._html()
-        self.assertNotIn("<script>", html_text.replace("<script></script>", ""))
+        self.assertNotIn("<script src=", html_text)
+        self.assertIn("<script>", html_text)
 
 
 def render_module_style():

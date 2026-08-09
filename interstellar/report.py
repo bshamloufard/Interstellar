@@ -22,12 +22,17 @@ as a number.
 
 from __future__ import annotations
 
+import difflib
 import functools
 import html
 import http.server
 import json
 import re
 import socketserver
+import subprocess
+import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,8 +41,20 @@ from interstellar.types import (
     ARM_CONTROL,
     ARM_TREATMENT,
     EFFICIENCY_METRICS,
+    PATCH_SKILL_TRUNCATE,
     make_report,
 )
+
+# --- rerun (Task 2: the dashboard's "run" button) ----------------------------
+#
+# k=5 is the review loop's default sample size, but at k=5 a verdict can
+# still wobble between PROVISIONAL and DIRECTIONAL (small_n's floor covers
+# why -- see _small_n_caveat). k=10 is the actual remedy, and k=3 is the
+# cheap sanity-check floor -- these three are the only values a reader is
+# ever offered, both in the UI's <select> and as the server's own
+# allow-list (see _RunManager.start / the /run handler): nothing else is
+# ever accepted as `k`, from the request or anywhere else.
+ALLOWED_RERUN_K = (3, 5, 10)
 
 # --- cross-patch caveats -----------------------------------------------------
 #
@@ -198,7 +215,8 @@ def _now_iso():
 
 
 def build(*, session, baseline_version, patch_results, dropped_patches=None,
-          k=0, cost_usd=0.0, generated_at=None, extra_caveats=None):
+          k=0, cost_usd=0.0, generated_at=None, extra_caveats=None,
+          rerun_args=None):
     """Assemble the Report per types.make_report.
 
     `patch_results` must already be fully-formed make_patch_result() dicts
@@ -212,6 +230,18 @@ def build(*, session, baseline_version, patch_results, dropped_patches=None,
     grades/statistics, so these do not get their own card -- see
     `_dropped_patch_caveat`. Full first-class rendering would need a
     frozen-contract decision this module cannot make unilaterally.
+
+    `rerun_args` (optional): a flat dict of extra CLI flags (cli.py's own
+    keyword names -- "max_patches", "model", "seed", etc., see
+    _RERUN_ARG_SPEC) the dashboard's run button should reuse when it
+    re-invokes `python3 -m interstellar review` for this session. Stored
+    verbatim under the report's own "rerun" key (report.json is this
+    module's artifact, not types.make_report's frozen contract, so this key
+    is not part of that shape -- see cli.py's own precedent of stamping
+    "cache_sensitive_metrics" onto the dict build() returns). `k` is
+    deliberately NOT included here: it comes from the request, validated
+    against ALLOWED_RERUN_K server-side, never trusted from stored config
+    either -- see _RunManager.
     """
     for pr in patch_results:
         if not pr.get("verdict_line"):
@@ -226,7 +256,7 @@ def build(*, session, baseline_version, patch_results, dropped_patches=None,
     if extra_caveats:
         caveats = caveats + list(extra_caveats)
 
-    return make_report(
+    rpt = make_report(
         session=session,
         baseline_version=baseline_version,
         patch_results=patch_results,
@@ -235,6 +265,12 @@ def build(*, session, baseline_version, patch_results, dropped_patches=None,
         k=k,
         generated_at=generated_at or _now_iso(),
     )
+    rpt["rerun"] = {
+        "trace_file": (session or {}).get("trace_file") or "",
+        "k_choices": list(ALLOWED_RERUN_K),
+        "args": dict(rerun_args) if rerun_args else {},
+    }
+    return rpt
 
 
 # --- rendering ----------------------------------------------------------------
@@ -339,9 +375,11 @@ def _interval_text(d):
     return text
 
 
-def _diff_html(diff_text):
-    if not diff_text or not diff_text.strip():
-        return '<p class="muted">No diff.</p>'
+def _diff_html_flat(diff_text):
+    """The original flat colored-<pre> renderer -- kept as the fallback for
+    a diff string that isn't parseable unified-diff output at all (no hunk
+    headers), so a malformed/raw diff still renders as *something* instead
+    of an empty box. The normal path is _diff_html below."""
     lines = []
     for ln in diff_text.splitlines():
         if ln.startswith(("+++", "---")):
@@ -355,7 +393,249 @@ def _diff_html(diff_text):
         else:
             cls = "ctx"
         lines.append(f'<span class="diff-line {cls}">{html.escape(ln) or " "}</span>')
-    return '<pre class="diff-wrap"><code>' + "\n".join(lines) + "</code></pre>"
+    return '<pre class="diff-flat"><code>' + "\n".join(lines) + "</code></pre>"
+
+
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_WORD_RE = re.compile(r"\s+|\S+")
+# Below this SequenceMatcher.ratio() on a del/add pair, the two lines are
+# not "the same line, modified" -- they're a coincidental sequence-length
+# match (or a genuine pure delete + pure add sitting next to each other).
+# Word-highlighting a pair that dissimilar would mark almost the whole line
+# as "changed", which is no more informative than the plain add/del rows
+# and actively misleading (it implies a closer relationship than exists).
+_CLOSE_MATCH_RATIO = 0.5
+
+
+def _strip_ab_prefix(path):
+    """harness._unified_diff() passes the same bare label ("skills/x/
+    SKILL.md", no a/ b/ prefix) as both fromfile and tofile, but a
+    hand-written or externally sourced diff may use git's a/ b/ convention
+    -- strip it if present so the file path in the summary header reads the
+    same either way, never "a/skills/x/SKILL.md"."""
+    path = path.strip()
+    if path[:2] in ("a/", "b/"):
+        return path[2:]
+    return path
+
+
+def _parse_unified_diff(diff_text):
+    """Parse unified-diff text (difflib.unified_diff's own output shape,
+    lineterm="") into (file_path, hunks). Each hunk is
+    {old_start, old_count, new_start, new_count, lines}, lines a list of
+    (tag, text) with tag in "ctx"/"add"/"del"/"note" ("note" is difflib's
+    "\\ No newline at end of file" marker -- kept visible, never counted
+    toward the add/del totals). The "---"/"+++" file-header lines are
+    consumed for the path and dropped from `hunks` entirely -- the diff's
+    summary header renders the path once, not as a diff row. A line before
+    any hunk header, or one that doesn't start with the expected +/-/space
+    prefix, is tolerated rather than raising: this renders real, possibly
+    slightly irregular diffs, it does not validate them."""
+    file_path = ""
+    hunks = []
+    cur = None
+    for raw in diff_text.splitlines():
+        if raw.startswith("--- "):
+            file_path = file_path or _strip_ab_prefix(raw[4:])
+            continue
+        if raw.startswith("+++ "):
+            stripped = _strip_ab_prefix(raw[4:])
+            if stripped and stripped != "/dev/null":
+                file_path = stripped
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            old_start, old_count, new_start, new_count = m.groups()
+            cur = {
+                "old_start": int(old_start), "old_count": int(old_count or 1),
+                "new_start": int(new_start), "new_count": int(new_count or 1),
+                "lines": [],
+            }
+            hunks.append(cur)
+            continue
+        if cur is None:
+            continue
+        if raw.startswith("\\"):
+            cur["lines"].append(("note", raw))
+        elif raw.startswith("+"):
+            cur["lines"].append(("add", raw[1:]))
+        elif raw.startswith("-"):
+            cur["lines"].append(("del", raw[1:]))
+        elif raw.startswith(" "):
+            cur["lines"].append(("ctx", raw[1:]))
+        elif raw == "":
+            cur["lines"].append(("ctx", ""))
+        else:
+            cur["lines"].append(("ctx", raw))
+    return file_path, hunks
+
+
+def _tokenize_words(s):
+    return _WORD_RE.findall(s)
+
+
+def _is_close_match(a, b):
+    if not a or not b:
+        return False
+    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= _CLOSE_MATCH_RATIO
+
+
+def _word_diff_spans(old_line, new_line):
+    """Word-level highlighting for a del/add pair that _is_close_match: run
+    difflib.SequenceMatcher over word tokens (regex, not str.split, so
+    whitespace is its own token and reassembling the opcodes reproduces the
+    original text exactly) and wrap the non-equal spans in <mark>. Only
+    called for a pair that already passed the closeness check -- this does
+    not itself decide whether highlighting is warranted."""
+    a, b = _tokenize_words(old_line), _tokenize_words(new_line)
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    old_parts, new_parts = [], []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        old_seg = html.escape("".join(a[i1:i2]))
+        new_seg = html.escape("".join(b[j1:j2]))
+        if tag == "equal":
+            old_parts.append(old_seg)
+            new_parts.append(new_seg)
+        else:
+            if old_seg:
+                old_parts.append(f'<mark class="chg-del">{old_seg}</mark>')
+            if new_seg:
+                new_parts.append(f'<mark class="chg-add">{new_seg}</mark>')
+    return "".join(old_parts), "".join(new_parts)
+
+
+def _diff_row(cls, old_no, new_no, code_html):
+    return (
+        f'<tr class="diff-row {cls}">'
+        f'<td class="ln old">{old_no}</td><td class="ln new">{new_no}</td>'
+        f'<td class="code">{code_html}</td></tr>'
+    )
+
+
+def _hunk_rows_html(h):
+    """Render one hunk's lines with old/new gutters. A contiguous del-run
+    immediately followed by an add-run -- the exact shape difflib.unified_
+    diff produces for a changed block -- is paired index-wise (del[i] with
+    add[i]) so each pair can be word-highlighted when close (see
+    _is_close_match); leftover dels or adds beyond the shorter run's length
+    render plain, as does a del-run or add-run with nothing paired at all
+    (a pure deletion or pure insertion)."""
+    lines = h["lines"]
+    old_no, new_no = h["old_start"], h["new_start"]
+    rows = []
+    i, n = 0, len(lines)
+    while i < n:
+        tag, text = lines[i]
+        if tag == "ctx":
+            rows.append(_diff_row("ctx", old_no, new_no, html.escape(text) or "&nbsp;"))
+            old_no += 1
+            new_no += 1
+            i += 1
+        elif tag == "note":
+            rows.append(
+                f'<tr class="diff-row note"><td class="ln" colspan="2"></td>'
+                f'<td class="code">{_esc(text)}</td></tr>'
+            )
+            i += 1
+        elif tag == "del":
+            dels = []
+            while i < n and lines[i][0] == "del":
+                dels.append(lines[i][1])
+                i += 1
+            adds = []
+            while i < n and lines[i][0] == "add":
+                adds.append(lines[i][1])
+                i += 1
+            paired = min(len(dels), len(adds))
+            for k in range(paired):
+                old_line, new_line = dels[k], adds[k]
+                if _is_close_match(old_line, new_line):
+                    old_html, new_html = _word_diff_spans(old_line, new_line)
+                else:
+                    old_html, new_html = html.escape(old_line), html.escape(new_line)
+                rows.append(_diff_row("del", old_no, "", old_html or "&nbsp;"))
+                old_no += 1
+                rows.append(_diff_row("add", "", new_no, new_html or "&nbsp;"))
+                new_no += 1
+            for old_line in dels[paired:]:
+                rows.append(_diff_row("del", old_no, "", html.escape(old_line) or "&nbsp;"))
+                old_no += 1
+            for new_line in adds[paired:]:
+                rows.append(_diff_row("add", "", new_no, html.escape(new_line) or "&nbsp;"))
+                new_no += 1
+        elif tag == "add":
+            rows.append(_diff_row("add", "", new_no, html.escape(text) or "&nbsp;"))
+            new_no += 1
+            i += 1
+        else:
+            i += 1
+    return rows
+
+
+def _truncate_fraction_text(patch, application, hunks):
+    """For a skill.truncate patch (the common case), state what fraction of
+    the file is being removed. Numerator: application["lines_changed"] --
+    the same figure the patch card's meta line already reports elsewhere --
+    falling back to summing patch["line_ranges"] directly if that field is
+    absent. Denominator: the highest old-file line number any hunk's
+    context reaches (max old_start+old_count-1 across hunks) -- the most a
+    figure derived only from patch/application/the diff text can honestly
+    claim as "how long the file is": difflib's default context window (3
+    lines) means this equals the file's true length only when the last
+    hunk's trailing context reaches EOF, which is the common case for a
+    truncate (the cut sections are usually not the file's last 3 lines) but
+    not a guarantee -- so this is the file's line-span as revealed by the
+    diff, not a value read from a stored total. Returns "" when there is
+    nothing to report (not a truncate, or no hunks)."""
+    if not patch or patch.get("kind") != PATCH_SKILL_TRUNCATE or not hunks:
+        return ""
+    removed = (application or {}).get("lines_changed")
+    if not removed:
+        ranges = patch.get("line_ranges") or []
+        removed = sum(int(e) - int(s) + 1 for s, e in ranges) if ranges else None
+    if not removed:
+        return ""
+    extent = max(h["old_start"] + h["old_count"] - 1 for h in hunks)
+    return f"removes {removed} of {extent} lines"
+
+
+def _diff_html(diff_text, *, patch=None, application=None):
+    if not diff_text or not diff_text.strip():
+        return '<p class="muted">No diff.</p>'
+    file_path, hunks = _parse_unified_diff(diff_text)
+    if not hunks:
+        return _diff_html_flat(diff_text)
+
+    added = sum(1 for h in hunks for tag, _ in h["lines"] if tag == "add")
+    removed = sum(1 for h in hunks for tag, _ in h["lines"] if tag == "del")
+    kind = (patch or {}).get("kind") or ""
+
+    summary_bits = [
+        f'<span class="diff-file">{_esc(file_path or "(no file path in diff)")}</span>',
+        '<span class="diff-counts">'
+        f'<span class="diff-add-count">+{added}</span> '
+        f'<span class="diff-del-count">&minus;{removed}</span></span>',
+    ]
+    if kind:
+        summary_bits.append(f'<span class="diff-kind">{_esc(kind)}</span>')
+    fraction = _truncate_fraction_text(patch, application, hunks)
+    if fraction:
+        summary_bits.append(f'<span class="diff-fraction">{_esc(fraction)}</span>')
+    summary_html = f'<div class="diff-summary">{"".join(summary_bits)}</div>'
+
+    rows = []
+    for h in hunks:
+        rows.append(
+            '<tr class="diff-row hunk"><td class="ln" colspan="2"></td>'
+            f'<td class="code">@@ -{h["old_start"]},{h["old_count"]} '
+            f'+{h["new_start"]},{h["new_count"]} @@</td></tr>'
+        )
+        rows.extend(_hunk_rows_html(h))
+    table_html = (
+        '<div class="diff-wrap"><table class="diff-table"><tbody>'
+        + "".join(rows) + "</tbody></table></div>"
+    )
+    return summary_html + table_html
 
 
 CACHE_SENSITIVE_TITLE = (
@@ -646,6 +926,38 @@ def _matrix_summary_line(matrix):
     return " · ".join(parts)
 
 
+def _run_panel_html(rerun, *, current_k):
+    """Task 2: the button that re-runs this report's review cycle. `rerun`
+    is the report["rerun"] dict build() stamped on (trace_file, k_choices,
+    args) -- see build()'s docstring. With no trace_file recorded (an
+    older report, or one built without going through cli.py's real
+    session), there is nothing for the server to re-run: render an
+    explanation, not a dead button."""
+    trace_file = rerun.get("trace_file") or ""
+    if not trace_file:
+        return (
+            '<div class="run-panel run-panel-disabled">'
+            '<span class="muted">Re-run unavailable: no trace file recorded '
+            "for this report.</span></div>"
+        )
+    choices = rerun.get("k_choices") or list(ALLOWED_RERUN_K)
+    default_k = current_k if current_k in choices else (5 if 5 in choices else choices[0])
+    options = "".join(
+        f'<option value="{c}"{" selected" if c == default_k else ""}>{c}</option>'
+        for c in choices
+    )
+    current_note = (
+        f'<span class="run-current muted">current report: k={_esc(current_k)}</span>'
+        if current_k else ""
+    )
+    return f"""<div class="run-panel" id="run-panel" data-trace="{_esc(trace_file)}">
+      {current_note}
+      <label class="run-k-label">k <select id="run-k">{options}</select></label>
+      <button id="run-btn" type="button">Re-run review cycle</button>
+      <span id="run-status" class="run-status idle">idle</span>
+    </div>"""
+
+
 def _gate_badge(gate, *, applied=True, high_severity_regressions=0, win_rate=None):
     """The badge is the one thing a scanning reader actually reads, so it
     must never be able to say something that isn't true. Four checks run
@@ -809,7 +1121,7 @@ def _patch_card(pr, idx, extra_caveats=None):
     reasons = gate.get("reasons") or []
     reasons_html = "".join(f"<li>{_esc(r)}</li>" for r in reasons) or '<li class="muted">No reasons recorded.</li>'
 
-    diff_block = _diff_html(diff_text)
+    diff_block = _diff_html(diff_text, patch=patch, application=application)
     if skip_reason:
         diff_block = f'<p class="muted">Not applied: {_esc(skip_reason)}</p>' + diff_block
 
@@ -871,19 +1183,23 @@ def _patch_card(pr, idx, extra_caveats=None):
       <p class="rationale">{_esc(patch.get("rationale"))}</p>
       {patch_caveats_html}
       <div class="patch-body">
-        <div class="diff-col">
+        <div class="diff-col-full">
           <div class="section-label">Diff</div>
           {diff_block}
         </div>
-        <div class="stats-col">
-          <div class="section-label">Before / after (k paired repeats)</div>
-          {table_html}
-          <div class="section-label">Judge outcome (treatment vs. control)</div>
-          {wtl_html}
-          {extra_html}
-          {regressions_html}
-          <div class="section-label">Gate</div>
-          <ul class="reasons">{reasons_html}</ul>
+        <div class="stats-row">
+          <div class="stats-col">
+            <div class="section-label">Before / after (k paired repeats)</div>
+            {table_html}
+            {regressions_html}
+          </div>
+          <div class="stats-col">
+            <div class="section-label">Judge outcome (treatment vs. control)</div>
+            {wtl_html}
+            {extra_html}
+            <div class="section-label">Gate</div>
+            <ul class="reasons">{reasons_html}</ul>
+          </div>
         </div>
       </div>
     </article>
@@ -916,6 +1232,7 @@ def render_html(report) -> str:
         <span class="pill">k <strong>{_esc(k)}</strong></span>
         <span class="pill">cycle cost <strong>${cost:,.4f}</strong></span>
         <span class="pill">generated <strong>{_esc(generated_at or "—")}</strong></span>
+        {_run_panel_html(report.get("rerun") or {}, current_k=k)}
       </div>
     </header>
     """
@@ -1107,6 +1424,58 @@ h1, h2, h3 { margin: 0; }
 }
 .pill strong { color: var(--text); font-weight: 600; }
 
+/* Task 2: the trigger button, in the topbar since it acts on the whole
+   session (re-runs the whole cycle), not any one patch. */
+.run-panel {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  border-left: 1px solid var(--border);
+  padding-left: 0.7rem;
+  margin-left: 0.2rem;
+}
+.run-panel-disabled { border-left: 1px solid var(--border); padding-left: 0.7rem; }
+.run-current { font-size: 11px; font-family: var(--mono); }
+.run-k-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.run-k-label select {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.15rem 0.3rem;
+}
+#run-btn {
+  font-family: var(--font);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+}
+#run-btn:hover:not(:disabled) { filter: brightness(1.08); }
+#run-btn:disabled { cursor: not-allowed; opacity: 0.55; }
+.run-status {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--muted);
+  max-width: 32ch;
+}
+.run-status.running { color: var(--provisional); }
+.run-status.done { color: var(--good); }
+.run-status.failed { color: var(--bad); font-weight: 600; }
+
 .content { max-width: 1180px; margin: 0 auto; padding: 1.1rem 1.1rem 3rem; }
 
 .section-label {
@@ -1240,10 +1609,16 @@ ul.patch-caveats li::before { content: "\26A0  "; color: var(--warn); }
 .badge.directional-unfavorable { color: var(--unfavorable); border-color: var(--unfavorable); background: var(--unfavorable-dim); }
 .badge.directional-neutral { color: var(--neutral-reading); border-color: var(--neutral-reading); background: var(--neutral-reading-dim); }
 
-.patch-body { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 1.1rem; align-items: start; }
-@media (max-width: 860px) { .patch-body { grid-template-columns: 1fr; } }
+/* Task 1: the diff is the thing the user is deciding on, so it gets the
+   card's full width; the metrics table and gate/judge readout sit below
+   it, side by side on anything wide enough. */
+.patch-body { display: flex; flex-direction: column; gap: 1rem; }
+.stats-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.1rem; align-items: start; }
+@media (max-width: 780px) { .stats-row { grid-template-columns: 1fr; } }
 
-.diff-wrap {
+/* Fallback for a diff string that has no parseable hunk headers (see
+   _diff_html_flat) -- the old flat colored-line view. */
+.diff-flat {
   margin: 0;
   max-height: 420px;
   overflow: auto;
@@ -1261,6 +1636,64 @@ ul.patch-caveats li::before { content: "\26A0  "; color: var(--warn); }
 .diff-line.hunk { color: var(--hunk-fg); }
 .diff-line.hdr { color: var(--muted); }
 .diff-line.ctx { color: var(--muted); }
+
+/* The real (parsed) diff view: a summary header (path, +/-, kind, and for
+   a skill.truncate the removed-fraction line) above a line-numbered,
+   gutter'd table -- see _diff_html / _hunk_rows_html. */
+.diff-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 12px;
+  margin-bottom: 0.4rem;
+}
+.diff-file { font-family: var(--mono); color: var(--text); font-weight: 600; word-break: break-all; }
+.diff-counts { font-family: var(--mono); }
+.diff-add-count { color: var(--good); }
+.diff-del-count { color: var(--bad); }
+.diff-kind { color: var(--muted); font-family: var(--mono); text-transform: none; }
+.diff-fraction { color: var(--warn); }
+
+.diff-wrap {
+  max-height: 460px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+table.diff-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+table.diff-table td.ln {
+  width: 1%;
+  min-width: 34px;
+  padding: 0 0.5rem;
+  text-align: right;
+  color: var(--faint);
+  user-select: none;
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+}
+table.diff-table td.ln.new { border-right-color: var(--border-strong); }
+table.diff-table td.code { padding: 0 0.75rem; white-space: pre; width: 100%; }
+tr.diff-row.add { background: var(--add-bg); color: var(--add-fg); }
+tr.diff-row.add td.ln { color: var(--add-fg); opacity: 0.7; }
+tr.diff-row.del { background: var(--del-bg); color: var(--del-fg); }
+tr.diff-row.del td.ln { color: var(--del-fg); opacity: 0.7; }
+tr.diff-row.hunk td.code { color: var(--hunk-fg); padding-top: 0.3rem; padding-bottom: 0.3rem; }
+tr.diff-row.hunk { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+tr.diff-row.ctx td.code { color: var(--muted); }
+tr.diff-row.note td.code { color: var(--faint); font-style: italic; }
+/* Word-level highlighting within a close-matching del/add pair (see
+   _word_diff_spans) -- a stronger mark than the whole row's tint so the
+   reader's eye lands on exactly what changed, not just which line. */
+mark.chg-del { background: var(--bad); color: var(--bg-elev); border-radius: 2px; padding: 0 1px; }
+mark.chg-add { background: var(--good); color: var(--bg-elev); border-radius: 2px; padding: 0 1px; }
 
 .table-wrap { overflow-x: auto; max-width: 100%; border: 1px solid var(--border); border-radius: 6px; }
 table.metrics { border-collapse: collapse; width: 100%; font-size: 12px; white-space: nowrap; }
@@ -1319,8 +1752,93 @@ tr.no-data td { color: var(--faint); font-style: italic; }
 # no chevron/aria affordance signaling it was even interactive. Removed
 # rather than made discoverable: nothing in the brief requires it, and the
 # risk (trust-critical evidence disappearing silently) outweighs the
-# convenience. The page is intentionally static; no JS is required at all.
-_SCRIPT = ""
+# convenience.
+#
+# The one piece of real interactivity this page has is Task 2's run panel:
+# POST /run to start a cycle, poll GET /status to reflect it live, reload
+# on completion. Both endpoints are only served over the loopback-only
+# server (see make_server) -- opening index.html directly (file://, or a
+# copy someone emails around) just shows "failed to start" on click, never
+# a broken page. No external script/resource is ever referenced (the
+# self-contained-page test asserts this), and nothing here reads or writes
+# anything outside these two endpoints.
+_SCRIPT = """
+(function () {
+  var panel = document.getElementById("run-panel");
+  var btn = document.getElementById("run-btn");
+  var statusEl = document.getElementById("run-status");
+  var kSelect = document.getElementById("run-k");
+  if (!panel || !btn || !statusEl || !kSelect) return;
+
+  var pollTimer = null;
+
+  function fmtElapsed(s) {
+    if (s === null || s === undefined) return "";
+    var m = Math.floor(s / 60), r = Math.floor(s % 60);
+    return m > 0 ? (m + "m " + r + "s") : (r + "s");
+  }
+
+  function setStatus(cls, text) {
+    statusEl.className = "run-status " + cls;
+    statusEl.textContent = text;
+  }
+
+  function poll() {
+    fetch("/status", {cache: "no-store"}).then(function (r) {
+      return r.json();
+    }).then(function (s) {
+      if (s.status === "running") {
+        btn.disabled = true;
+        setStatus("running", "running k=" + s.k + " \\u2014 " + fmtElapsed(s.elapsed_s) +
+          " elapsed (a cycle can take several minutes and spends real API cost)");
+      } else if (s.status === "done") {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        setStatus("done", "done in " + fmtElapsed(s.elapsed_s) + " \\u2014 reloading\\u2026");
+        setTimeout(function () { window.location.reload(); }, 800);
+      } else if (s.status === "failed") {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        btn.disabled = false;
+        setStatus("failed", "failed: " + (s.error || ("exit code " + s.returncode)));
+      } else {
+        btn.disabled = false;
+        setStatus("idle", "idle");
+      }
+    }).catch(function () {
+      // A dropped poll is not evidence the run stopped -- try again next
+      // tick rather than collapsing a running state back to idle.
+    });
+  }
+
+  btn.addEventListener("click", function () {
+    btn.disabled = true;
+    setStatus("running", "starting\\u2026");
+    fetch("/run", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({k: parseInt(kSelect.value, 10)}),
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (e) {
+          throw new Error(e.error || ("HTTP " + r.status));
+        });
+      }
+      return r.json();
+    }).then(function () {
+      if (!pollTimer) pollTimer = setInterval(poll, 2000);
+      poll();
+    }).catch(function (err) {
+      btn.disabled = false;
+      setStatus("failed", "failed to start: " + err.message);
+    });
+  });
+
+  // Pick up a cycle already running from a previous click (e.g. the user
+  // reloaded, or opened this report in a second tab) instead of only
+  // reacting to a click made in this exact page load.
+  pollTimer = setInterval(poll, 2000);
+  poll();
+})();
+"""
 
 
 # --- persistence ---------------------------------------------------------------
@@ -1357,18 +1875,174 @@ _SERVABLE_CONTENT_TYPES = {
     "report.json": "application/json; charset=utf-8",
 }
 
+# --- Task 2: the /run + /status endpoints ------------------------------------
+#
+# SECURITY: /run is a loopback-only endpoint that spawns a subprocess. The
+# ONE thing this module will never do is build that subprocess's argv from
+# request-supplied content. `k` is the only value the request contributes,
+# and it is checked against ALLOWED_RERUN_K (a fixed tuple of ints, not a
+# pattern or a range) before it touches anything -- see _RunManager.start.
+# Every other argument -- the trace file, --out, and any extra flags --
+# comes from `report["rerun"]`, itself only ever populated by build() at
+# report-generation time (see build()'s docstring), never by a request.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Extra CLI flags a stored rerun config MAY carry (report["rerun"]["args"],
+# set via build(rerun_args=...)), mapped to the interstellar-review argv
+# flag and a caster. Only these names are ever turned into argv -- an
+# unrecognized key in the stored config is dropped, not passed through.
+# This is defense in depth, not a defense against the request (the request
+# never reaches this dict at all -- see _build_rerun_argv) -- it keeps the
+# subprocess's argv fully enumerable from this one table even if
+# report["rerun"]["args"] is later populated by a caller this module
+# doesn't control.
+_RERUN_ARG_SPEC = {
+    "max_patches": ("--max-patches", int),
+    "budget_usd": ("--budget-usd", float),
+    "use_cached_analysis": ("--use-cached-analysis", bool),
+    "model": ("--model", str),
+    "max_parallel": ("--max-parallel", int),
+    "timeout": ("--timeout", int),
+    "seed": ("--seed", int),
+    "max_token_regression": ("--max-token-regression", float),
+    "grok_home": ("--grok-home", str),
+    "no_preflight": ("--no-preflight", bool),
+}
+
+
+def _build_rerun_argv(*, trace_file, out_dir, k, args):
+    """The exact argv for `python3 -m interstellar review ...`. Caller must
+    have already validated `k` against ALLOWED_RERUN_K -- this function
+    trusts it as given. `args` is only ever report["rerun"]["args"] (see
+    module note above); a key not in _RERUN_ARG_SPEC is dropped."""
+    argv = [
+        sys.executable, "-m", "interstellar", "review", str(trace_file),
+        "--out", str(out_dir), "--k", str(k),
+    ]
+    for name, value in (args or {}).items():
+        spec = _RERUN_ARG_SPEC.get(name)
+        if spec is None or value is None:
+            continue
+        flag, caster = spec
+        if caster is bool:
+            if value:
+                argv.append(flag)
+        else:
+            argv.append(flag)
+            argv.append(str(caster(value)))
+    return argv
+
+
+class _RunManager:
+    """Tracks at most one review-cycle subprocess for this server's out_dir.
+    A cycle takes minutes and spends real API/model cost, so a second /run
+    while one is already in flight is refused (409), never queued and never
+    used to kill the first one.
+
+    `argv_builder` defaults to _build_rerun_argv (the real `python3 -m
+    interstellar review ...` command) and exists as an injection point so
+    tests can exercise this class's threading/status/HTTP behavior against
+    a real, fast, free subprocess instead of the real (slow, costly) review
+    cycle -- the same dependency-injection pattern cli.py's own
+    run_review() uses for grok-dev calls.
+    """
+
+    def __init__(self, out_dir, rerun_config, argv_builder=None):
+        self._out_dir = out_dir
+        self._rerun = rerun_config or {}
+        self._argv_builder = argv_builder or _build_rerun_argv
+        self._lock = threading.Lock()
+        self._status = "idle"
+        self._k = None
+        self._started_at = None
+        self._finished_at = None
+        self._returncode = None
+        self._error = None
+
+    def snapshot(self):
+        with self._lock:
+            elapsed = None
+            if self._started_at is not None:
+                end = self._finished_at if self._finished_at is not None else time.time()
+                elapsed = round(end - self._started_at, 1)
+            return {
+                "status": self._status,
+                "k": self._k,
+                "elapsed_s": elapsed,
+                "returncode": self._returncode,
+                "error": self._error,
+                "trace_file": self._rerun.get("trace_file") or "",
+            }
+
+    def start(self, k):
+        """Validate `k` (the only request-supplied value -- see the module
+        note above) and, if nothing is already running, spawn the
+        subprocess in a background thread. Returns (ok, error_message)."""
+        if k not in ALLOWED_RERUN_K:
+            return False, f"k must be one of {list(ALLOWED_RERUN_K)}"
+        trace_file = self._rerun.get("trace_file")
+        if not trace_file:
+            return False, "no trace file recorded for this report; cannot re-run"
+        with self._lock:
+            if self._status == "running":
+                return False, "a review cycle is already running"
+            self._status = "running"
+            self._k = k
+            self._started_at = time.time()
+            self._finished_at = None
+            self._returncode = None
+            self._error = None
+        argv = self._argv_builder(
+            trace_file=trace_file, out_dir=self._out_dir, k=k,
+            args=self._rerun.get("args"),
+        )
+        threading.Thread(target=self._run, args=(argv,), daemon=True).start()
+        return True, None
+
+    def _run(self, argv):
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(_REPO_ROOT), capture_output=True, text=True,
+                timeout=3600,
+            )
+            with self._lock:
+                self._finished_at = time.time()
+                self._returncode = proc.returncode
+                if proc.returncode == 0:
+                    self._status = "done"
+                else:
+                    tail = (proc.stderr or proc.stdout or "").strip()
+                    self._status = "failed"
+                    self._error = tail[-2000:] or f"exited with code {proc.returncode}"
+        except Exception as exc:  # subprocess.TimeoutExpired, spawn failure, ...
+            with self._lock:
+                self._finished_at = time.time()
+                self._status = "failed"
+                self._error = str(exc)
+
 
 class _ReportOnlyHandler(http.server.BaseHTTPRequestHandler):
-    """Serves only report.json and index.html from out_dir. No directory
-    listing, no path traversal (the path is looked up in a fixed dict, never
-    joined onto the filesystem), no other file in out_dir is ever reachable."""
+    """Serves only report.json and index.html from out_dir (GET), plus the
+    /run and /status control endpoints (see module note above). No
+    directory listing, no path traversal (the path is looked up in a fixed
+    dict, never joined onto the filesystem), no other file in out_dir is
+    ever reachable."""
 
-    def __init__(self, *args, out_dir, **kwargs):
+    def __init__(self, *args, out_dir, run_manager=None, **kwargs):
         self._out_dir = out_dir
+        self._run_manager = run_manager
         super().__init__(*args, **kwargs)
 
     def do_GET(self):  # noqa: N802 (stdlib handler method name)
-        name = _SERVABLE.get(self.path.split("?", 1)[0])
+        path = self.path.split("?", 1)[0]
+        if path == "/status":
+            if self._run_manager is None:
+                self._send_json(503, {"error": "run manager unavailable"})
+            else:
+                self._send_json(200, self._run_manager.snapshot())
+            return
+        name = _SERVABLE.get(path)
         fp = self._out_dir / name if name else None
         if fp is None or not fp.is_file():
             self.send_error(404)
@@ -1376,6 +2050,48 @@ class _ReportOnlyHandler(http.server.BaseHTTPRequestHandler):
         data = fp.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", _SERVABLE_CONTENT_TYPES[name])
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):  # noqa: N802 (stdlib handler method name)
+        if self.path.split("?", 1)[0] != "/run":
+            self.send_error(404)
+            return
+        if self._run_manager is None:
+            self._send_json(503, {"error": "run manager unavailable"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        # The only legitimate payload is a one-key {"k": <int>} object --
+        # refuse an oversized body outright rather than reading an
+        # arbitrary amount of attacker-controlled data into memory.
+        if length > 4096:
+            self._send_json(400, {"error": "request body too large"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length) if length else b"{}")
+        except json.JSONDecodeError:
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+        k = body.get("k") if isinstance(body, dict) else None
+        # bool is an int subclass in Python -- explicitly excluded so
+        # {"k": true} can't sneak past `k in ALLOWED_RERUN_K` on some
+        # future allow-list that happened to include 1.
+        if not isinstance(k, int) or isinstance(k, bool) or k not in ALLOWED_RERUN_K:
+            self._send_json(400, {"error": f"k must be one of {list(ALLOWED_RERUN_K)}"})
+            return
+        ok, err = self._run_manager.start(k)
+        if not ok:
+            status = 409 if err == "a review cycle is already running" else 400
+            self._send_json(status, {"error": err})
+            return
+        self._send_json(202, self._run_manager.snapshot())
+
+    def _send_json(self, status, payload):
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -1391,15 +2107,26 @@ class _LoopbackTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 
 
-def make_server(out_dir, host="127.0.0.1", port=4242):
+def make_server(out_dir, host="127.0.0.1", port=4242, argv_builder=None):
     """Build (but do not start) a loopback-only TCP server that serves only
-    report.json and index.html from out_dir -- see the module note above.
-    Split out from serve() so tests can bind an ephemeral port (port=0) and
-    inspect server_address without blocking."""
+    report.json and index.html from out_dir, plus /run and /status (see the
+    module notes above) -- backed by a fresh _RunManager loaded from
+    out_dir/report.json's "rerun" key, if present. Split out from serve()
+    so tests can bind an ephemeral port (port=0) and inspect server_address
+    without blocking. `argv_builder` is forwarded to _RunManager -- see its
+    docstring for why tests want to override it."""
     out_dir = Path(out_dir).resolve()
     if not (out_dir / "index.html").is_file():
         raise SystemExit(f"error: {out_dir} has no index.html (call write() first)")
-    handler = functools.partial(_ReportOnlyHandler, out_dir=out_dir)
+    rerun_config = {}
+    report_path = out_dir / "report.json"
+    if report_path.is_file():
+        try:
+            rerun_config = json.loads(report_path.read_text(encoding="utf-8")).get("rerun") or {}
+        except (json.JSONDecodeError, OSError):
+            rerun_config = {}
+    run_manager = _RunManager(out_dir, rerun_config, argv_builder=argv_builder)
+    handler = functools.partial(_ReportOnlyHandler, out_dir=out_dir, run_manager=run_manager)
     return _LoopbackTCPServer((host, port), handler)
 
 
