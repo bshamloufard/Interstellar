@@ -405,10 +405,24 @@ def _rank_and_select(all_patches, dig, max_patches):
     an accident of recommendation order, not a re-introduction of the same
     scale bias one level up.
 
-    Every patch NOT selected -- already-unappliable, or cut by the budget
-    -- is logged with a concrete reason (including its own impact_score/
-    impact_unit) so a run never reads as "we silently tested a top-N and
-    called it everything"."""
+    Returns (selected, dropped). `dropped` is a list of full Patch dicts
+    (types.make_patch shape, each a copy of the original) -- directly
+    usable as `report.build(dropped_patches=dropped)`, per
+    final-review.md I4: a patch that was ranked out or rejected before
+    ranking must still appear in the report itself, not only in
+    progress.json/stdout. Each carries two extra keys beyond the frozen
+    Patch shape (`impact_score`/`impact_unit`) for the CLI's own ranking
+    transparency; report.py's `_dropped_patch_caveat` only reads the
+    frozen fields, so the extras are harmless baggage to it.
+
+    A patch cut for budget (appliable, just outranked) arrives with
+    `skipped_reason=None` -- patches.py never rejected it -- so one is
+    synthesized here naming the rank/class/score, letting it render
+    through the exact same `report.build` surface as a genuinely
+    lint-rejected patch instead of needing a second, parallel rendering
+    path (the same "two implementations of one job" duplication
+    final-review.md calls out elsewhere). An already-skipped patch keeps
+    its own `skipped_reason` from `patches.py` untouched."""
     appliable = [p for p in all_patches if not p.get("skipped_reason")]
     already_skipped = [p for p in all_patches if p.get("skipped_reason")]
 
@@ -439,21 +453,22 @@ def _rank_and_select(all_patches, dig, max_patches):
             if p["patch_id"] in selected_ids:
                 continue
             score = _patch_impact_score(p, dig)
-            dropped.append({
-                "patch_id": p["patch_id"], "kind": p["kind"], "target": p["target"],
-                "impact_score": score, "impact_unit": unit,
-                "reason": (f"budget: ranked {rank} of {len(group)} in the "
-                           f"{unit!r} impact class (impact_score={score:g} "
-                           f"{unit}); round-robin across {len(class_order)} "
-                           f"class(es) filled --max-patches={max_patches} "
-                           "before reaching it"),
-            })
+            entry = dict(p)
+            entry["impact_score"] = score
+            entry["impact_unit"] = unit
+            entry["skipped_reason"] = (
+                f"budget: ranked {rank} of {len(group)} in the "
+                f"{unit!r} impact class (impact_score={score:g} "
+                f"{unit}); round-robin across {len(class_order)} "
+                f"class(es) filled --max-patches={max_patches} "
+                "before reaching it"
+            )
+            dropped.append(entry)
     for p in already_skipped:
-        dropped.append({
-            "patch_id": p["patch_id"], "kind": p["kind"], "target": p["target"],
-            "impact_score": None, "impact_unit": None,
-            "reason": f"not appliable before ranking: {p['skipped_reason']}",
-        })
+        entry = dict(p)
+        entry["impact_score"] = None
+        entry["impact_unit"] = None
+        dropped.append(entry)
     return selected, dropped
 
 
@@ -726,8 +741,24 @@ def _cache_warmth_caveat(patch_results):
     )
 
 
-def _base_extra_caveats(trace, baseline_source, baseline_version, estimate,
-                        dropped_patches, max_patches):
+# The cost figure omits judge (LLM-as-judge grading) calls: grade.py's own
+# default judge implementation does not surface `total_cost_usd` anywhere
+# this module can read without reimplementing its call/retry/isolation
+# logic (final-review.md I1) -- doing that here would be exactly the "two
+# implementations of the same job" duplication final-review.md separately
+# flags elsewhere, so the honest fix on this side is disclosure, not a
+# parallel judge-calling path. Replay runs, the analyzer call, and the
+# preflight check ARE all folded into the total.
+JUDGE_COST_CAVEAT = (
+    "Reported cycle cost includes replay runs, the analyzer call (when not "
+    "--use-cached-analysis), and the preflight check -- it does NOT "
+    "include judge (LLM-as-judge grading) call costs, which are not "
+    "currently surfaced by the grading module. The true spend for this "
+    "cycle is higher than the figure shown."
+)
+
+
+def _base_extra_caveats(trace, baseline_source, baseline_version, estimate):
     caveats = [
         f"Baseline harness snapshotted from: {baseline_source} "
         f"(version {baseline_version['version_id']})."
@@ -760,16 +791,6 @@ def _base_extra_caveats(trace, baseline_source, baseline_version, estimate,
         + estimate.get("note", "")
     )
 
-    if dropped_patches:
-        shown = dropped_patches[:8]
-        more = len(dropped_patches) - len(shown)
-        caveats.append(
-            f"{len(dropped_patches)} candidate patch(es) were not run this "
-            f"cycle (--max-patches={max_patches}): "
-            + "; ".join(f"{d['patch_id']} ({d['kind']}/{d['target']}): {d['reason']}"
-                       for d in shown)
-            + (f"; and {more} more (see progress.json)." if more > 0 else ".")
-        )
     return caveats
 
 
@@ -792,10 +813,10 @@ def _truncate(text, n=200):
 def _print_dropped(dropped_patches, limit=8):
     shown = dropped_patches[:limit]
     for d in shown:
-        print(f"    [{d['patch_id']}] {d['kind']}/{d['target']}: {d['reason']}")
+        print(f"    [{d['patch_id']}] {d['kind']}/{d['target']}: {d['skipped_reason']}")
     more = len(dropped_patches) - len(shown)
     if more > 0:
-        print(f"    ... and {more} more (see plan.json / progress.json)")
+        print(f"    ... and {more} more (see plan.json / progress.json / the report)")
 
 
 def _print_cost_estimate(estimate, budget_usd):
@@ -1118,7 +1139,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
                   file=sys.stderr)
         return plan
 
-    caveats_args = (baseline_source, baseline_version, estimate, dropped_patches, max_patches)
+    caveats_args = (baseline_source, baseline_version, estimate)
 
     if not selected_patches:
         state["status"] = "no_patches"
@@ -1128,6 +1149,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             session=_session_info(trace, prompt, trace_path),
             baseline_version=_baseline_summary(baseline_version),
             patch_results=[], k=k, cost_usd=0.0,
+            dropped_patches=dropped_patches,
             extra_caveats=_base_extra_caveats(trace, *caveats_args))
         rpt["cache_sensitive_metrics"] = CACHE_SENSITIVE_METRICS
         report.write(rpt, out_dir)
@@ -1266,7 +1288,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
         state["updated_at"] = now().isoformat()
         _write_json(progress_path, state)
 
-    extra_caveats = _base_extra_caveats(trace, *caveats_args)
+    extra_caveats = _base_extra_caveats(trace, *caveats_args) + [JUDGE_COST_CAVEAT]
     cache_caveat = _cache_warmth_caveat(patch_results)
     if cache_caveat:
         extra_caveats = extra_caveats + [cache_caveat]
@@ -1275,6 +1297,7 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
         session=_session_info(trace, prompt, trace_path),
         baseline_version=_baseline_summary(baseline_version),
         patch_results=patch_results, k=k, cost_usd=total_cost,
+        dropped_patches=dropped_patches,
         extra_caveats=extra_caveats)
     rpt["cache_sensitive_metrics"] = CACHE_SENSITIVE_METRICS
     report.write(rpt, out_dir)

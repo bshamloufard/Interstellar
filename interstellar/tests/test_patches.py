@@ -417,6 +417,45 @@ class SkillKeepTests(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+class UnknownTypeTests(unittest.TestCase):
+    """final-review.md I5: an unrecognized rec["type"] (e.g. from a newer/
+    older analyzer build) must not silently vanish -- it becomes a skipped
+    patch like any other rejected-before-ranking recommendation, so it
+    still reaches the report (types.make_patch's own docstring: a dropped
+    recommendation must be indistinguishable from one that was never
+    made)."""
+
+    def test_unknown_type_becomes_a_skipped_patch_not_nothing(self):
+        version = _version()
+        rec = _rec(type="skill_reorder", target="fully-used-skill",
+                   action="reorder the sections")
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertEqual(len(out), 1)
+        patch = out[0]
+        self.assertIsNotNone(patch["skipped_reason"])
+        self.assertIn("skill_reorder", patch["skipped_reason"])
+        self.assertEqual(patch["kind"], "skill_reorder")
+        self.assertEqual(patch["target"], "fully-used-skill")
+        self.assertEqual(patch["source_recommendation"], rec)
+
+    def test_unknown_type_never_raises(self):
+        version = _version()
+        rec = _rec(type="some_future_type", target="x")
+        try:
+            patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        except Exception as exc:  # noqa: BLE001 -- explicitly asserting no raise
+            self.fail(f"unrecognized type must not raise, raised {exc!r}")
+
+    def test_missing_type_is_handled_the_same_way(self):
+        version = _version()
+        rec = _rec(target="x")
+        rec.pop("type", None)
+        out = patches.from_recommendations([rec], version, digest=EMPTY_DIGEST)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["kind"], "unknown")
+        self.assertIsNotNone(out[0]["skipped_reason"])
+
+
 class SecurityLintTests(unittest.TestCase):
     def test_clean_text_passes(self):
         self.assertEqual(patches.security_lint(

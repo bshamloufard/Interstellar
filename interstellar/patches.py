@@ -575,7 +575,20 @@ def from_recommendations(recs, version, *, digest, grok=_default_grok):
             patches.extend(_mcp_action_patches(rec, digest_mcp, digest_failed, counter))
         elif rtype in _RULES_APPEND_TYPES:
             patches.append(_rules_append_patch(rec, _RULES_APPEND_TYPES[rtype], _next_patch_id(counter)))
-        # unknown types are ignored rather than raising: the analyzer's schema
-        # is an enum, but a recommendation from an older/newer analyzer build
-        # should not crash the loop.
+        else:
+            # Recorded, not silently discarded: the analyzer's schema is an
+            # enum today, but a recommendation from an older/newer analyzer
+            # build could name a type this mapping doesn't handle. Not
+            # raising is still correct (one unrecognized type must not crash
+            # the loop) -- but a dropped recommendation with no trace
+            # anywhere is indistinguishable from one the analyzer never
+            # made (types.make_patch's own docstring; final-review.md I5),
+            # so this becomes a skipped patch like any other
+            # rejected-before-ranking recommendation instead of a silent
+            # gap in the patch list.
+            patches.append(make_patch(
+                patch_id=_next_patch_id(counter), kind=rtype or "unknown",
+                target=rec.get("target", ""), rationale=_rationale(rec),
+                expected_effect="", source_recommendation=rec,
+                skipped_reason=f"unrecognized recommendation type: {rtype!r}"))
     return patches

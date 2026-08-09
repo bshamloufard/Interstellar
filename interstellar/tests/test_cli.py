@@ -288,10 +288,17 @@ class RankAndSelectTests(unittest.TestCase):
         dropped_ids = {d["patch_id"] for d in dropped}
         self.assertEqual(dropped_ids, {"patch-002", "patch-003"})
         by_id = {d["patch_id"]: d for d in dropped}
-        self.assertIn("budget", by_id["patch-002"]["reason"])
+        # dropped entries are full Patch dicts (report.build(dropped_patches=)
+        # needs kind/target/skipped_reason/rationale/source_recommendation),
+        # plus impact_score/impact_unit for the CLI's own ranking transparency.
+        self.assertEqual(by_id["patch-002"]["kind"], PATCH_SKILL_TRUNCATE)
+        self.assertEqual(by_id["patch-002"]["target"], "low")
+        self.assertIn("budget", by_id["patch-002"]["skipped_reason"])
         self.assertEqual(by_id["patch-002"]["impact_unit"], "tokens_est")
         self.assertEqual(by_id["patch-002"]["impact_score"], 10.0)
-        self.assertIn("not appliable before ranking", by_id["patch-003"]["reason"])
+        # already-skipped patches keep their own original skipped_reason
+        # verbatim, untouched by ranking.
+        self.assertEqual(by_id["patch-003"]["skipped_reason"], "skill not found: bad")
         self.assertIsNone(by_id["patch-003"]["impact_score"])
 
     def test_keeps_everything_when_under_budget(self):
@@ -330,7 +337,7 @@ class RankAndSelectTests(unittest.TestCase):
         self.assertEqual(len(selected_ids), 2)
         self.assertEqual(len(dropped), 1)  # only the weaker of the two mcp patches drops
         self.assertEqual(dropped[0]["patch_id"], "patch-003")
-        self.assertIn("'ms' impact class", dropped[0]["reason"])
+        self.assertIn("'ms' impact class", dropped[0]["skipped_reason"])
 
     def test_round_robin_gives_each_class_a_slot_before_a_second_pick(self):
         dig = {
@@ -627,6 +634,53 @@ class CheckBudgetTests(unittest.TestCase):
             cli._check_budget({"estimated_total_usd": None}, 5.0)
 
 
+class CheckWorkspaceOutCollisionTests(unittest.TestCase):
+    """final-review.md C1: --out defaulting inside the replayed workspace
+    (the documented default, runs/<ts>, IS inside the repo when the repo
+    itself is the workspace -- the headline use case) makes
+    isolated_workdir copy the workspace into itself. Must refuse before
+    the preflight call, not discover it as a misdiagnosed auth failure."""
+
+    def test_none_workspace_never_refuses(self):
+        cli._check_workspace_out_collision(None, Path("/tmp/out"))  # must not raise
+
+    def test_out_inside_workspace_refuses(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            out_dir = workspace / "runs" / "20260101T000000Z"
+            with self.assertRaises(SystemExit) as ctx:
+                cli._check_workspace_out_collision(workspace, out_dir)
+            message = str(ctx.exception)
+            self.assertIn(str(workspace.resolve()), message)
+            self.assertIn(str(out_dir.resolve()), message)
+
+    def test_workspace_inside_out_refuses(self):
+        # The reverse nesting -- out_dir is an ancestor of workspace --
+        # would have the exact same self-copy problem the other direction.
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            workspace = out_dir / "checkout" / "repo"
+            with self.assertRaises(SystemExit):
+                cli._check_workspace_out_collision(workspace, out_dir)
+
+    def test_identical_paths_refuse(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td)
+            with self.assertRaises(SystemExit):
+                cli._check_workspace_out_collision(path, path)
+
+    def test_sibling_directories_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "repo"
+            out_dir = root / "runs"
+            workspace.mkdir()
+            cli._check_workspace_out_collision(workspace, out_dir)  # must not raise
+
+    def test_unrelated_paths_pass(self):
+        cli._check_workspace_out_collision(Path("/tmp/a/workspace"), Path("/tmp/b/out"))
+
+
 class PreflightTests(unittest.TestCase):
     """`_run_preflight` in isolation -- no `run_review` involved."""
 
@@ -765,8 +819,8 @@ class DryRunTests(unittest.TestCase):
         # skill not found in the (skill-less) fixture harness -> patch is
         # correctly reported as not appliable, never silently dropped.
         self.assertEqual(plan["selected_patches"], [])
-        reasons = [d["reason"] for d in plan["dropped_patches"]]
-        self.assertTrue(any("not appliable" in r for r in reasons))
+        reasons = [d["skipped_reason"] for d in plan["dropped_patches"]]
+        self.assertTrue(any("not found" in r for r in reasons))
 
     def test_budget_usd_zero_refuses(self):
         with mock.patch("subprocess.run", side_effect=_refuse_to_spawn):
@@ -1030,6 +1084,63 @@ class ProgressJournalTests(unittest.TestCase):
         self.assertEqual(len(matrix_files), 2)
 
     # -- preflight, fail-fast, and the all-failed exit code --------------
+
+    def test_out_inside_workspace_refuses_before_preflight_spawns_anything(self):
+        # End-to-end reproduction of C1: out_dir defaulting/landing inside
+        # the trace's recorded workspace must refuse at plan time, before
+        # the preflight call -- not spend anything on a cycle that would
+        # copy the workspace into itself.
+        with self.assertRaises(SystemExit) as ctx:
+            with mock.patch.object(cli, "_run_preflight", side_effect=AssertionError(
+                    "preflight must never be reached when out_dir is nested "
+                    "inside the workspace")):
+                self._run(out_dir=self.workspace / "runs" / "cycle")
+        message = str(ctx.exception)
+        self.assertIn(str(self.workspace.resolve()), message)
+        self.assertFalse((self.out_dir / "progress.json").exists())
+
+    def test_preflight_cost_is_folded_into_reported_cycle_cost(self):
+        def costed_runner(argv, **kwargs):
+            env = kwargs.get("env") or {}
+            home = env.get("GROK_HOME", "")
+            if "preflight-home" in home:
+                return _FakeCompletedProcess(json.dumps({
+                    "sessionId": "preflight", "text": "OK",
+                    "total_cost_usd": 0.0111,
+                }))
+            return _fake_runner(argv, **kwargs)
+
+        rpt = self._run(runner=costed_runner)
+        # 2 patches x 2 arms x k=1 x $0.002 (per _fake_runner) + one
+        # preflight call at $0.0111 -- the preflight's own real cost must
+        # show up in the total, not vanish (final-review.md I1).
+        self.assertAlmostEqual(rpt["cost_usd"], 4 * 0.002 + 0.0111, places=6)
+
+    def test_report_names_what_the_cost_figure_excludes(self):
+        rpt = self._run()
+        caveats_text = " ".join(rpt["caveats"])
+        self.assertIn("does NOT include judge", caveats_text)
+
+    def test_dropped_patches_appear_in_the_report_not_just_progress_json(self):
+        # final-review.md I4: report.build(dropped_patches=) is the
+        # purpose-built, non-truncating surface -- must actually be wired
+        # up, not left dead while cli.py rolls its own truncated summary.
+        recs = list(self.recs) + [
+            {"type": "skill_add_lines", "target": "nonexistent-skill",
+             "action": "add missing guidance", "evidence": "e", "confidence": "low"},
+        ]
+        rpt = self._run(
+            max_patches=1,  # forces a real budget cut too, not just the lint one
+            analyze_fn=lambda dig, model=None: (
+                {"session_verdict": "minor_waste", "recommendations": recs}, {}))
+        caveats_text = " ".join(rpt["caveats"])
+        self.assertIn("Considered but never run", caveats_text)
+        # the lint/not-found rejection (skill_add_lines on a skill that
+        # doesn't exist in this fixture's skill-less harness) -- rejected
+        # before ranking, by patches.py itself, never spawning grok-dev.
+        self.assertIn("not found in harness version", caveats_text)
+        # a genuine budget cut (3 recs in, max_patches=1)
+        self.assertIn("budget: ranked", caveats_text)
 
     def test_preflight_runs_before_the_loop_and_aborts_on_failure(self):
         def always_fail(argv, **kwargs):

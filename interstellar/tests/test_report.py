@@ -495,9 +495,17 @@ class WriteTests(unittest.TestCase):
         self.assertNotIn('class="badge reject"', html_text)
 
     def test_gate_badge_directional_favorable_at_small_n(self):
-        self._build_and_write([_all_ties_patch_result()], k=3)
+        pr = _all_ties_patch_result()
+        self.assertEqual(pr["gate"].get("quality_evidence"), "ties_only")  # sanity
+        self._build_and_write([pr], k=3)
         html_text = self._html()
-        self.assertIn('class="badge directional-favorable">DIRECTIONAL &middot; FAVORABLE</span>', html_text)
+        # quality_evidence != "decided" -> the efficiency-only suffix is
+        # part of the badge itself, not only in the reasons list
+        self.assertIn(
+            'class="badge directional-favorable">DIRECTIONAL &middot; FAVORABLE '
+            '(efficiency only, no decided quality pairs)</span>',
+            html_text,
+        )
 
     def test_gate_badge_regressed_overrides_rejected_when_high_severity_present(self):
         # _rejected_patch_result carries a high-severity regression, so C-2's
@@ -971,6 +979,50 @@ class FixRound3ReviewTests(unittest.TestCase):
         html_text = self._html()
         self.assertNotIn('class="tag cache-tag"', html_text)
         self.assertNotIn('class="cache-legend', html_text)
+
+    # --- quality_evidence: a favorable/unfavorable reading with zero
+    # decided quality pairs behind it must say so on the badge itself ---
+
+    def test_quality_evidence_none_gets_efficiency_only_suffix(self):
+        # zero judged pairs at all -- gate()'s "none" variant. Exercised as
+        # a direct _gate_badge unit test since a real stats.summarize()/
+        # gate() call that reaches directional="favorable" with genuinely
+        # zero judged pairs (not merely all-ties) isn't reachable through
+        # ordinary synthetic grades -- efficiency-only-with-no-judge-calls
+        # is exactly the edge case the field exists to describe honestly.
+        gate = {
+            "accepted": False, "provisional": False, "directional": "favorable",
+            "quality_evidence": "none",
+            "reasons": [
+                "insufficient_samples_for_acceptance: only 0 judged pair(s) -- k<5 cannot support an accept decision at any confidence",
+                'directional reading ("favorable") rests on efficiency alone: no judged quality pairs at all',
+            ],
+        }
+        badge = report._gate_badge(gate, applied=True, high_severity_regressions=0, win_rate={"wins": 0, "ties": 0, "losses": 0, "n": 0})
+        self.assertIn("DIRECTIONAL &middot; FAVORABLE (efficiency only, no decided quality pairs)", badge)
+
+    def test_quality_evidence_absent_renders_no_suffix(self):
+        # older gate dicts (predating this field) must render exactly as
+        # before -- no suffix, no crash.
+        gate = {
+            "accepted": False, "provisional": True, "directional": "unfavorable",
+            "reasons": ["provisional quality pass: ..."],
+        }
+        badge = report._gate_badge(gate)
+        self.assertIn('PROVISIONAL &middot; UNFAVORABLE</span>', badge)
+        self.assertNotIn("efficiency only", badge)
+
+    def test_quality_evidence_neutral_reading_never_gets_the_suffix(self):
+        # the suffix only qualifies an optimistic/pessimistic claim --
+        # "neutral" has no claim to qualify, even at quality_evidence="none"
+        gate = {
+            "accepted": False, "provisional": False, "directional": "neutral",
+            "quality_evidence": "none",
+            "reasons": ["insufficient_samples_for_acceptance: only 0 judged pair(s)"],
+        }
+        badge = report._gate_badge(gate)
+        self.assertIn("DIRECTIONAL &middot; NEUTRAL</span>", badge)
+        self.assertNotIn("efficiency only", badge)
 
     # --- Minors worth a regression test ---
 

@@ -481,6 +481,32 @@ class RunMatrixTests(unittest.TestCase):
         (dest / "sessions").mkdir(parents=True, exist_ok=True)
         return dest
 
+    def test_scratch_inside_workspace_does_not_break_every_run(self):
+        # Final review C1, exercised at the level the bug actually fired:
+        # the documented default puts --out (and therefore scratch) inside
+        # workspace itself. Before the isolated_workdir fix, this made every
+        # single run's copytree recurse into its own destination -- every
+        # run in the matrix failed with a path error that looked, to the
+        # user, like an auth failure.
+        workspace = self.root / "repo"
+        workspace.mkdir()
+        (workspace / "app.py").write_text("x = 1\n")
+        scratch = workspace / "runs" / "ts1" / "scratch" / "p1" / "runs"
+
+        def fake_runner(argv, **kwargs):
+            return _ok_run(argv, kwargs)
+
+        matrix = run_matrix(
+            "prompt", control=self.control, treatment=self.treatment,
+            k=1, workspace=workspace, scratch=scratch,
+            auth_from=self.auth_from, max_parallel=1,
+            runner=fake_runner, materialize=self._fake_materialize,
+        )
+
+        for arm in (ARM_CONTROL, ARM_TREATMENT):
+            for r in matrix["arms"][arm]:
+                self.assertTrue(r["ok"], r.get("error"))
+
     def test_produces_2k_results(self):
         def fake_runner(argv, **kwargs):
             return _ok_run(argv, kwargs)
