@@ -316,6 +316,33 @@ class RunFailedRegressionTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# _diagnose_failure()
+# --------------------------------------------------------------------------
+
+class DiagnoseFailureTest(unittest.TestCase):
+    def test_none_raw(self):
+        self.assertIn("None", grade._diagnose_failure(None))
+
+    def test_non_dict_raw(self):
+        self.assertIn("non-dict", grade._diagnose_failure("oops"))
+
+    def test_invalid_winner_value(self):
+        msg = grade._diagnose_failure({"winner": "maybe"})
+        self.assertIn("'maybe'", msg)
+
+    def test_error_dict_includes_exit_code_and_stderr(self):
+        msg = grade._diagnose_failure({
+            "winner": None, "error": "structuredOutputError: boom",
+            "exit_code": 1, "stderr_tail": "Error: max turns reached\n",
+            "structured_output_state": "null",
+        })
+        self.assertIn("structuredOutputError: boom", msg)
+        self.assertIn("exit_code=1", msg)
+        self.assertIn("structuredOutput=null", msg)
+        self.assertIn("max turns reached", msg)
+
+
+# --------------------------------------------------------------------------
 # judge_pair()
 # --------------------------------------------------------------------------
 
@@ -348,7 +375,8 @@ class JudgePairTest(unittest.TestCase):
         self.assertEqual(verdict["verdict"], ARM_CONTROL)
         self.assertTrue(verdict["consistent"])
         self.assertEqual(len(verdict["raw"]), 3)
-        self.assertEqual(verdict["raw"][2], {"judge_model": None})
+        # No retry needed -- both calls succeed on the first attempt.
+        self.assertEqual(verdict["raw"][2], {"judge_model": None, "attempts": [1, 1]})
 
     def test_agreeing_orders_favoring_b_return_treatment(self):
         grok = _agreeing_grok("2")  # stable preference for response_b
@@ -388,7 +416,46 @@ class JudgePairTest(unittest.TestCase):
 
         verdict = judge_pair("do the thing", "a", "b", grok=fake, model="grok-4.5")
         self.assertEqual(seen, ["grok-4.5", "grok-4.5"])
-        self.assertEqual(verdict["raw"][2], {"judge_model": "grok-4.5"})
+        self.assertEqual(verdict["raw"][2], {"judge_model": "grok-4.5", "attempts": [1, 1]})
+
+    def test_a_call_that_fails_once_then_succeeds_is_retried_and_recovers(self):
+        # Fix-round-3 ask #2: retry once before giving up. Each position
+        # order fails its first attempt, succeeds its second -- the pair
+        # must still produce a real verdict, and `attempts` must show it.
+        calls = {"order1": 0, "order2": 0}
+
+        def flaky(prompt_text, schema, *, model=None):
+            # order1 (a, b) has "response a text" before the "Response 2"
+            # heading; order2 (b, a) has it after -- distinguish by position,
+            # not just substring presence (both prompts contain both texts).
+            order = ("order1"
+                     if prompt_text.index("response a text") < prompt_text.index("## Response 2")
+                     else "order2")
+            calls[order] += 1
+            if calls[order] == 1:
+                return {"garbage": True}
+            return {"winner": "1" if order == "order1" else "2", "reason": "recovered"}
+
+        verdict = judge_pair("do the thing", "response a text", "response b text", grok=flaky)
+        self.assertEqual(verdict["verdict"], ARM_CONTROL)
+        self.assertTrue(verdict["consistent"])
+        self.assertEqual(verdict["raw"][2]["attempts"], [2, 2])
+        self.assertEqual(calls["order1"], 2)
+        self.assertEqual(calls["order2"], 2)
+
+    def test_retry_is_capped_at_two_attempts_not_infinite(self):
+        calls = []
+
+        def always_garbage(prompt_text, schema, *, model=None):
+            calls.append(1)
+            return {"garbage": True}
+
+        verdict = judge_pair("do the thing", "a", "b", grok=always_garbage)
+        self.assertEqual(verdict["verdict"], "tie")
+        self.assertFalse(verdict["consistent"])
+        # 2 attempts per position order, 2 orders = 4 calls total, not more.
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(verdict["raw"][2]["attempts"], [2, 2])
 
     def test_response_text_is_fenced_with_unpredictable_per_call_markers(self):
         # I6: untrusted response text must be delimited, and the delimiter
@@ -602,6 +669,56 @@ class GradeMatrixTest(unittest.TestCase):
             "note": "no judged pairs -- consistency is undefined",
         })
 
+    def test_unparseable_judge_call_records_why_as_a_low_severity_regression(self):
+        # Fix-round-3 ask #1: judge=None must not be a silent absence -- the
+        # reason has to reach the grade somewhere the report will render it.
+        matrix = make_replay_matrix(
+            prompt="do the thing", k=1,
+            arms={
+                ARM_CONTROL: [make_run_result(
+                    arm=ARM_CONTROL, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/c", workdir="/tmp/cw", trace=_trace(), response_text="a",
+                )],
+                ARM_TREATMENT: [make_run_result(
+                    arm=ARM_TREATMENT, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/t", workdir="/tmp/tw", trace=_trace(), response_text="b",
+                )],
+            },
+            control_version_id="c1", treatment_version_id="t1",
+        )
+
+        def broken_grok(prompt_text, schema, *, model=None):
+            return {"winner": None, "error": "structuredOutputError: model did not "
+                                              "produce structured output", "exit_code": 1}
+
+        grades = grade_matrix(matrix, prompt="do the thing", grok=broken_grok)
+        self.assertIsNone(grades[0]["judge"])
+        unavailable = [r for r in grades[0]["regressions"] if r["kind"] == "judge_unavailable"]
+        self.assertEqual(len(unavailable), 1)
+        self.assertEqual(unavailable[0]["severity"], "low")
+        self.assertIn("structuredOutputError", unavailable[0]["detail"])
+        self.assertIn("order1", unavailable[0]["detail"])
+        self.assertIn("order2", unavailable[0]["detail"])
+
+    def test_successful_judge_call_has_no_judge_unavailable_regression(self):
+        matrix = make_replay_matrix(
+            prompt="do the thing", k=1,
+            arms={
+                ARM_CONTROL: [make_run_result(
+                    arm=ARM_CONTROL, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/c", workdir="/tmp/cw", trace=_trace(), response_text="a",
+                )],
+                ARM_TREATMENT: [make_run_result(
+                    arm=ARM_TREATMENT, repeat=0, ok=True, prompt="do the thing",
+                    home="/tmp/t", workdir="/tmp/tw", trace=_trace(), response_text="b",
+                )],
+            },
+            control_version_id="c1", treatment_version_id="t1",
+        )
+        grades = grade_matrix(matrix, prompt="do the thing", grok=_agreeing_grok("1"))
+        self.assertIsNotNone(grades[0]["judge"])
+        self.assertFalse(any(r["kind"] == "judge_unavailable" for r in grades[0]["regressions"]))
+
     def test_control_failed_treatment_ok_is_not_flagged_as_run_failed(self):
         matrix = make_replay_matrix(
             prompt="do the thing", k=1,
@@ -653,8 +770,8 @@ class GradeMatrixTest(unittest.TestCase):
 # are mocked; nothing here spawns grok-dev or touches the real ~/.grok.
 # --------------------------------------------------------------------------
 
-def _fake_proc(stdout):
-    return types.SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+def _fake_proc(stdout, *, stderr="", returncode=0):
+    return types.SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
 
 
 class DefaultGrokParsingTest(unittest.TestCase):
@@ -666,9 +783,10 @@ class DefaultGrokParsingTest(unittest.TestCase):
         self.materialize = materialize_patch.start()
         self.addCleanup(materialize_patch.stop)
 
-    def _run_with_stdout(self, stdout):
+    def _run_with_stdout(self, stdout, *, stderr="", returncode=0):
         with mock.patch("interstellar.grade.subprocess.run",
-                         return_value=_fake_proc(stdout)) as run:
+                         return_value=_fake_proc(stdout, stderr=stderr,
+                                                  returncode=returncode)) as run:
             result = grade._default_grok("prompt", grade._JUDGE_SCHEMA)
         return result, run
 
@@ -695,6 +813,37 @@ class DefaultGrokParsingTest(unittest.TestCase):
         result, _ = self._run_with_stdout(stdout)
         self.assertIsNone(result.get("winner"))
         self.assertIn("did not match schema", result["error"])
+        self.assertEqual(result["structured_output_state"], "null")
+
+    def test_max_turns_exhaustion_is_diagnosable_not_a_bare_failure(self):
+        # Fix-round-3 root cause, reproduced verbatim against the real
+        # binary: --max-turns too low cuts the run off with exactly this
+        # shape -- stopReason "cancelled", exit 1, stderr "Error: max turns
+        # reached", structuredOutputError set even though `text` already
+        # held a complete answer the model never got to emit as structured
+        # output. Every field the fix-round-3 review asked to be recorded
+        # must be present and correct here.
+        stdout = json.dumps({
+            "text": '{"winner": "tie", "reason": "..."}',
+            "stopReason": "cancelled",
+            "structuredOutput": None,
+            "structuredOutputError": "model did not produce structured output",
+        })
+        result, _ = self._run_with_stdout(
+            stdout, stderr="Error: max turns reached\n", returncode=1)
+        self.assertIsNone(result.get("winner"))
+        self.assertIn("model did not produce structured output", result["error"])
+        self.assertEqual(result["exit_code"], 1)
+        self.assertIn("max turns reached", result["stderr_tail"])
+        self.assertEqual(result["structured_output_state"], "null")
+
+    def test_structured_output_absent_key_is_distinguished_from_null(self):
+        stdout = json.dumps({
+            "text": "not json",
+            "structuredOutputError": "model did not produce structured output",
+        })
+        result, _ = self._run_with_stdout(stdout)
+        self.assertEqual(result["structured_output_state"], "absent")
 
     def test_falls_back_to_text_only_when_structured_output_absent(self):
         stdout = json.dumps({"text": '{"winner": "tie", "reason": "ok"}'})
@@ -743,7 +892,11 @@ class DefaultGrokParsingTest(unittest.TestCase):
         self.assertIn("--no-subagents", argv)
         self.assertIn("--disable-web-search", argv)
         self.assertIn("--max-turns", argv)
-        self.assertEqual(argv[argv.index("--max-turns") + 1], "1")
+        # Fix-round-3 root cause: "1" cut the run off before the model's
+        # separate structured-output-emission turn could run. Verified live
+        # against the real binary that "3" (a one-turn margin over the "2"
+        # that fixed it) eliminates the failure entirely.
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "3")
         self.assertIn("--sandbox", argv)
         disallowed = argv[argv.index("--disallowed-tools") + 1]
         for tool in ("run_terminal_command", "read_file", "write", "search_replace",

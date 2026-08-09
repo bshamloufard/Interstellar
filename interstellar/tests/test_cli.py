@@ -407,6 +407,121 @@ class CountRunsTests(unittest.TestCase):
         self.assertEqual(cli._count_runs(patch_results), (0, 0))
 
 
+def _patch_for_verdict(kind="skill.truncate", target="strict-audit"):
+    return {"kind": kind, "target": target}
+
+
+class VerdictLineTests(unittest.TestCase):
+    """The exact bug: a k=3 patch that measured a real improvement (47%
+    token reduction, judged tie, zero regressions) printed as "REJECTED
+    (trends favorable)" because REJECTED was the default for anything
+    neither accepted nor provisional, regardless of why."""
+
+    def test_accepted(self):
+        gate_result = {"accepted": True, "provisional": False,
+                       "directional": "favorable", "reasons": ["all clear"]}
+        line = cli._verdict_line(_patch_for_verdict(), gate_result)
+        self.assertTrue(line.startswith("ACCEPTED:"))
+
+    def test_provisional(self):
+        gate_result = {"accepted": False, "provisional": True,
+                       "directional": "favorable", "reasons": ["provisional pass"]}
+        line = cli._verdict_line(_patch_for_verdict(), gate_result)
+        self.assertTrue(line.startswith("PROVISIONAL:"))
+
+    def test_insufficient_samples_favorable_is_directional_not_rejected(self):
+        # The reported bug, verbatim shape: k=3 -> n=3 judged pairs -> n <
+        # MIN_SAMPLES_FOR_ACCEPT (5) -> stats.gate() cannot call it either
+        # way, but the evidence trends favorable.
+        gate_result = {
+            "accepted": False, "provisional": False, "directional": "favorable",
+            "reasons": ["insufficient_samples_for_acceptance: only 3 judged "
+                       "pair(s) -- k<5 cannot support an accept decision"],
+        }
+        line = cli._verdict_line(_patch_for_verdict(), gate_result)
+        self.assertTrue(line.startswith("DIRECTIONAL: FAVORABLE:"))
+        self.assertNotIn("REJECTED", line)
+
+    def test_insufficient_samples_unfavorable_is_directional_not_rejected(self):
+        gate_result = {
+            "accepted": False, "provisional": False, "directional": "unfavorable",
+            "reasons": ["insufficient_samples_for_acceptance: only 3 judged pair(s)"],
+        }
+        line = cli._verdict_line(_patch_for_verdict(), gate_result)
+        self.assertTrue(line.startswith("DIRECTIONAL: UNFAVORABLE:"))
+        self.assertNotIn("REJECTED", line)
+
+    def test_real_rejection_with_enough_samples_is_rejected(self):
+        # n >= MIN_SAMPLES_FOR_ACCEPT, an actual quality regression -- no
+        # "insufficient_samples_for_acceptance" reason at all, so this IS
+        # the state REJECTED should be reserved for.
+        gate_result = {
+            "accepted": False, "provisional": False, "directional": "unfavorable",
+            "reasons": ["quality regression: 4 loss(es), win-rate lower CI "
+                       "0.1 does not clear 0.5"],
+        }
+        line = cli._verdict_line(_patch_for_verdict(), gate_result)
+        self.assertTrue(line.startswith("REJECTED:"))
+
+    def test_high_severity_regression_with_enough_samples_is_rejected(self):
+        gate_result = {
+            "accepted": False, "provisional": False, "directional": "unfavorable",
+            "reasons": ["1 high-severity regression(s): mcp server X crashed"],
+        }
+        line = cli._verdict_line(_patch_for_verdict(), gate_result)
+        self.assertTrue(line.startswith("REJECTED:"))
+
+    def test_unknown_directional_never_renders_as_neutral_or_rejected(self):
+        # Zero usable pairs -- every run failed on at least one arm.
+        gate_result = {
+            "accepted": False, "provisional": False, "directional": "unknown",
+            "reasons": ["no successful paired runs: 0 of 3 runs produced usable data"],
+        }
+        line = cli._verdict_line(_patch_for_verdict(), gate_result)
+        self.assertTrue(line.startswith("DIRECTIONAL: UNKNOWN:"))
+        self.assertNotIn("NEUTRAL", line)
+        self.assertNotIn("REJECTED", line)
+
+    def test_not_applied_patch_renders_as_directional_unknown(self):
+        # The exact shape run_review hand-builds when harness.apply skips a
+        # patch (lint failure, out-of-range lines, ...): nothing was ever
+        # measured, which must read the same as the zero-usable-pairs case
+        # above, not as a real "neutral" (measured-and-even) reading.
+        gate_result = {
+            "accepted": False, "provisional": False, "directional": "unknown",
+            "reasons": ["patch not applied: skill not found: strict-audit"],
+        }
+        line = cli._verdict_line(_patch_for_verdict(), gate_result)
+        self.assertTrue(line.startswith("DIRECTIONAL: UNKNOWN:"))
+
+
+class AllDirectionalForSampleSizeTests(unittest.TestCase):
+    def _pr(self, accepted=False, provisional=False, insufficient=True):
+        reasons = (["insufficient_samples_for_acceptance: only 3 judged pair(s)"]
+                   if insufficient else ["quality regression: 4 loss(es)"])
+        return {"gate": {"accepted": accepted, "provisional": provisional,
+                        "reasons": reasons}}
+
+    def test_true_when_every_patch_is_sample_size_blocked(self):
+        prs = [self._pr(), self._pr()]
+        self.assertTrue(cli._all_directional_for_sample_size(prs))
+
+    def test_false_when_any_patch_accepted(self):
+        prs = [self._pr(), self._pr(accepted=True, insufficient=False)]
+        self.assertFalse(cli._all_directional_for_sample_size(prs))
+
+    def test_false_when_any_patch_provisional(self):
+        prs = [self._pr(), self._pr(provisional=True, insufficient=False)]
+        self.assertFalse(cli._all_directional_for_sample_size(prs))
+
+    def test_false_when_a_patch_is_a_real_rejection(self):
+        prs = [self._pr(), self._pr(insufficient=False)]
+        self.assertFalse(cli._all_directional_for_sample_size(prs))
+
+    def test_false_when_empty(self):
+        self.assertFalse(cli._all_directional_for_sample_size([]))
+
+
 class CostEstimateTests(unittest.TestCase):
     def test_uses_real_manifest_numbers(self):
         estimate = cli._cost_estimate(
@@ -651,6 +766,18 @@ def _fake_stats_gate(summary, *, primary_effect=None, max_token_regression=0.10)
             "reasons": ["fake gate: not enough signal"]}
 
 
+def _sample_size_blocked_stats_gate(summary, *, primary_effect=None, max_token_regression=0.10):
+    """The real reported bug's exact gate shape: k=3 -> n=3 judged pairs,
+    below stats.MIN_SAMPLES_FOR_ACCEPT (5), so accepted/provisional are
+    both False purely on sample size -- with a favorable trend, per the
+    real cycle that surfaced this (1458 -> 774 skill tokens, judged tie,
+    zero regressions)."""
+    return {"accepted": False, "provisional": False, "directional": "favorable",
+            "reasons": ["insufficient_samples_for_acceptance: only 3 judged "
+                       "pair(s) -- k<5 cannot support an accept decision at "
+                       "any confidence"]}
+
+
 class ProgressJournalTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -710,6 +837,25 @@ class ProgressJournalTests(unittest.TestCase):
             self.assertIn(pr["patch"]["patch_id"], printed)
             self.assertIn(pr["verdict_line"], printed)
         self.assertIn(str(self.out_dir / "index.html"), printed)
+        # provisional patches (the default fake gate) are not the
+        # sample-size-blocked case -- no --k suggestion should print.
+        self.assertNotIn("directional-only", printed)
+
+    def test_sample_size_blocked_favorable_patch_prints_directional_not_rejected(self):
+        # End-to-end reproduction of the real report: a favorable,
+        # sample-size-blocked gate result must never print as REJECTED,
+        # and the cycle summary must point the user at --k 10.
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            rpt = self._run(stats_gate=_sample_size_blocked_stats_gate)
+        printed = stdout.getvalue()
+
+        for pr in rpt["patch_results"]:
+            self.assertTrue(pr["verdict_line"].startswith("DIRECTIONAL: FAVORABLE:"))
+        self.assertNotIn("REJECTED", printed)
+        self.assertIn("DIRECTIONAL: FAVORABLE", printed)
+        self.assertIn(f"--k {cli.stats.MIN_SAMPLES_FOR_CI}", printed)
+        self.assertIn("directional-only", printed)
 
     def test_journals_progress_after_each_patch(self):
         writes = []

@@ -359,12 +359,43 @@ _JUDGE_HARNESS_VERSION = make_harness_version(
 )
 
 
+def _diagnostic(error, *, exit_code=None, stderr="", structured_output_state=None):
+    """One consistently-shaped failure dict -- every field the fix-round-3
+    review asked to be recorded, on every failure path: the error message
+    verbatim, the process exit code, a truncated stderr tail, and whether
+    `structuredOutput` was absent, present-but-null, or present-but-wrong-type.
+    `winner: None` keeps `_call_winner` treating this as unparseable.
+    """
+    return {
+        "winner": None,
+        "error": error,
+        "exit_code": exit_code,
+        "stderr_tail": (stderr or "")[-500:],
+        "structured_output_state": structured_output_state,
+    }
+
+
 def _default_grok(prompt_text, schema, *, model=None, timeout=600):
     """One `grok-dev` child process, structured output via --json-schema, run
     in a throwaway GROK_HOME with no skills, no MCP servers, and every
     built-in tool denied (see `_JUDGE_HARNESS_VERSION` /
     `_JUDGE_DISALLOWED_TOOLS`) so a prompt-injected response transcript has
     nothing to reach with even if I6's fencing is somehow defeated.
+
+    `--max-turns 3`: empirically necessary, not a guess. Fix-round-3
+    investigation traced the "2 of 3 judge calls unparseable" report to this
+    call originally passing `--max-turns 1` -- structured output on this
+    backend is emitted via a synthetic tool call on a turn *after* the
+    model's visible reasoning/text turn, so `--max-turns 1` frequently cut
+    the run off with `stopReason: "cancelled"`, exit code 1, stderr `"Error:
+    max turns reached"`, and `structuredOutputError: "model did not produce
+    structured output"` -- even though the model's `text` buffer already
+    held a complete, correctly-formed answer it never got to emit as
+    structured output. Reproduced live against the real binary with the
+    exact response text from the failing run: 4/10 calls failed at
+    `--max-turns 1`, 0/10 failed at `--max-turns 2`; `3` leaves a one-turn
+    margin at zero cost (the judge places zero tool calls either way, so
+    extra turn budget goes unused when not needed).
 
     Always returns a dict, never a bare None, so a failure is legible in
     `judge_pair`'s `raw` output instead of being indistinguishable from any
@@ -382,7 +413,7 @@ def _default_grok(prompt_text, schema, *, model=None, timeout=600):
             home = harness.materialize(_JUDGE_HARNESS_VERSION, Path(tmp) / "home",
                                         auth_from=Path.home() / ".grok")
         except FileNotFoundError as exc:
-            return {"winner": None, "error": f"no judge credentials: {exc}"}
+            return _diagnostic(f"no judge credentials: {exc}")
 
         cmd = [str(GROK), "-p", prompt_text,
                "--json-schema", json.dumps(schema),
@@ -390,7 +421,7 @@ def _default_grok(prompt_text, schema, *, model=None, timeout=600):
                "--permission-mode", "bypassPermissions",
                "--disallowed-tools", ",".join(_JUDGE_DISALLOWED_TOOLS),
                "--no-subagents", "--disable-web-search",
-               "--max-turns", "1", "--sandbox", "strict"]
+               "--max-turns", "3", "--sandbox", "strict"]
         if model:
             cmd += ["--model", model]
         env = {**os.environ, "GROK_HOME": str(home)}
@@ -399,36 +430,52 @@ def _default_grok(prompt_text, schema, *, model=None, timeout=600):
             proc = subprocess.run(cmd, cwd=str(home), env=env,
                                    capture_output=True, text=True, timeout=timeout)
         except (subprocess.SubprocessError, OSError) as exc:
-            return {"winner": None, "error": f"{type(exc).__name__}: {exc}"}
+            return _diagnostic(f"{type(exc).__name__}: {exc}")
 
         try:
             out = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
-            return {"winner": None, "error": f"unparseable stdout: {exc}"}
+            return _diagnostic(f"unparseable stdout: {exc}",
+                                exit_code=proc.returncode, stderr=proc.stderr)
         if not isinstance(out, dict):
-            return {"winner": None, "error": "stdout json is not an object"}
+            return _diagnostic("stdout json is not an object",
+                                exit_code=proc.returncode, stderr=proc.stderr)
 
         if out.get("structuredOutputError"):
-            return {"winner": None,
-                    "error": f"structuredOutputError: {out['structuredOutputError']}"}
+            return _diagnostic(
+                f"structuredOutputError: {out['structuredOutputError']}",
+                exit_code=proc.returncode, stderr=proc.stderr,
+                structured_output_state=(
+                    "null" if "structuredOutput" in out and out["structuredOutput"] is None
+                    else "absent"
+                ),
+            )
 
         structured = out.get("structuredOutput")
         if structured is not None:
-            result = dict(structured) if isinstance(structured, dict) else {"winner": None}
-            result["_source"] = "structuredOutput"
-            return result
+            if isinstance(structured, dict):
+                result = dict(structured)
+                result["_source"] = "structuredOutput"
+                return result
+            return _diagnostic("structuredOutput present but not an object",
+                                exit_code=proc.returncode, stderr=proc.stderr,
+                                structured_output_state="present_non_dict")
 
         # structuredOutput absent -- fall back to the text buffer. Documented
         # by the harness itself as untrustworthy for this purpose; used only
         # when the authoritative field is missing, never preferred over it.
+        state = "null" if "structuredOutput" in out else "absent"
         text = out.get("text") or ""
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            return {"winner": None, "error": "no structuredOutput and text is not JSON"}
+            return _diagnostic("no structuredOutput and text is not JSON",
+                                exit_code=proc.returncode, stderr=proc.stderr,
+                                structured_output_state=state)
         if not isinstance(parsed, dict):
-            return {"winner": None,
-                    "error": "no structuredOutput and text is not a JSON object"}
+            return _diagnostic("no structuredOutput and text is not a JSON object",
+                                exit_code=proc.returncode, stderr=proc.stderr,
+                                structured_output_state=state)
         parsed = dict(parsed)
         parsed["_source"] = "text_fallback"
         return parsed
@@ -448,34 +495,86 @@ def _call_winner(raw):
     return None
 
 
+_JUDGE_CALL_MAX_ATTEMPTS = 2
+
+
+def _diagnose_failure(raw):
+    """Human-readable reason one raw judge call produced no usable winner --
+    used to explain an unparseable pair rather than just recording that one
+    happened (fix-round-3 finding: "an unexplained absence is only half the
+    fix")."""
+    if raw is None:
+        return "grok callable returned None"
+    if not isinstance(raw, dict):
+        return f"grok callable returned non-dict: {raw!r}"
+    if raw.get("error"):
+        bits = [str(raw["error"])]
+        if raw.get("exit_code") not in (None, 0):
+            bits.append(f"exit_code={raw['exit_code']}")
+        if raw.get("structured_output_state"):
+            bits.append(f"structuredOutput={raw['structured_output_state']}")
+        if raw.get("stderr_tail"):
+            bits.append(f"stderr={raw['stderr_tail']!r}")
+        return ", ".join(bits)
+    return f"winner field was {raw.get('winner')!r}, not one of '1'/'2'/'tie'"
+
+
+def _call_grok_with_retry(grok, prompt_text, schema, *, model,
+                           max_attempts=_JUDGE_CALL_MAX_ATTEMPTS):
+    """Call `grok` up to `max_attempts` times, stopping at the first attempt
+    that produces a valid winner. Judge calls are cheap relative to a replay
+    run, and a transient failure (network blip, an occasional validation
+    miss) shouldn't cost a sample point when one retry likely recovers it.
+    Returns `(raw, attempts_made)` -- `attempts_made > 1` means a retry
+    happened, and that is recorded alongside the raw result, not silently
+    absorbed.
+    """
+    raw = None
+    for attempt in range(1, max_attempts + 1):
+        raw = grok(prompt_text, schema, model=model)
+        if _call_winner(raw) is not None:
+            return raw, attempt
+    return raw, max_attempts
+
+
 def _judge_pair_impl(prompt, response_a, response_b, *, grok=None, model=None):
     """Shared implementation behind `judge_pair` (public) and `grade_matrix`
-    (needs the extra `unparseable` bit to null out a Grade's judge instead of
-    recording a fabricated tie -- review finding I12).
+    (needs the extra `unparseable`/`failure_detail` bits to null out a
+    Grade's judge instead of recording a fabricated tie, while still
+    explaining why -- review finding I12, fix-round-3 follow-up).
 
-    Returns `(verdict_dict, unparseable)`. `unparseable` is True only when at
-    least one of the two calls returned something with no valid `winner` --
-    a genuine disagreement between two calls that both parsed is a legitimate
-    tie, not this.
+    Returns `(verdict_dict, unparseable, failure_detail)`. `unparseable` is
+    True only when at least one of the two (retried) calls returned nothing
+    with a valid `winner` -- a genuine disagreement between two calls that
+    both parsed is a legitimate tie, not this. `failure_detail` is a
+    human-readable string when `unparseable` is True, else None.
     """
     grok = grok or _default_grok
 
-    raw1 = grok(_judge_prompt(prompt, response_a, response_b), _JUDGE_SCHEMA, model=model)
-    raw2 = grok(_judge_prompt(prompt, response_b, response_a), _JUDGE_SCHEMA, model=model)
+    raw1, attempts1 = _call_grok_with_retry(
+        grok, _judge_prompt(prompt, response_a, response_b), _JUDGE_SCHEMA, model=model)
+    raw2, attempts2 = _call_grok_with_retry(
+        grok, _judge_prompt(prompt, response_b, response_a), _JUDGE_SCHEMA, model=model)
 
     w1 = _call_winner(raw1)  # "first" == a, "second" == b
     w2 = _call_winner(raw2)  # "first" == b, "second" == a
     # `model=None` is recorded too -- "the judge ran on whatever the config
     # default happened to be" is itself worth stating, not silently omitted
-    # (review finding I10).
-    raw = [raw1, raw2, {"judge_model": model}]
+    # (review finding I10). `attempts` records whether a retry happened.
+    raw = [raw1, raw2, {"judge_model": model, "attempts": [attempts1, attempts2]}]
 
     if w1 is None or w2 is None:
+        failures = []
+        if w1 is None:
+            failures.append(f"order1(a,b) after {attempts1} attempt(s): {_diagnose_failure(raw1)}")
+        if w2 is None:
+            failures.append(f"order2(b,a) after {attempts2} attempt(s): {_diagnose_failure(raw2)}")
+        detail = "; ".join(failures)
         return make_judge_verdict(
             verdict="tie", consistent=False,
             reason="judge call returned unparseable output",
             raw=raw,
-        ), True
+        ), True, detail
 
     side1 = {"first": ARM_CONTROL, "second": ARM_TREATMENT, "tie": "tie"}[w1]
     side2 = {"first": ARM_TREATMENT, "second": ARM_CONTROL, "tie": "tie"}[w2]
@@ -485,32 +584,34 @@ def _judge_pair_impl(prompt, response_a, response_b, *, grok=None, model=None):
             verdict="tie", consistent=False,
             reason="position swap disagreed",
             raw=raw,
-        ), False
+        ), False, None
 
     return make_judge_verdict(
         verdict=side1, consistent=True,
         reason=(raw1.get("reason", "") if isinstance(raw1, dict) else ""),
         raw=raw,
-    ), False
+    ), False, None
 
 
 def judge_pair(prompt, response_a, response_b, *, grok=None, model=None):
     """Position-swapped pairwise verdict between response_a (control) and
     response_b (treatment).
 
-    Two calls are made: (a, b) then (b, a). When the two orderings disagree
-    about the winner, consistent=False and the verdict is "tie" -- an
-    order-dependent preference is not evidence, and this function never
-    resolves that disagreement toward either side. A judge call that returns
-    unparseable output degrades the whole pair to a tie the same way (per the
-    brief: "a fake grok returning garbage degrades to a tie rather than
-    raising"). `grade_matrix` additionally uses the unparseable/tie
-    distinction internally to exclude non-runs from the graded sample --
-    see `_judge_pair_impl` -- but that distinction is not part of this
-    function's public contract, which always returns a `make_judge_verdict`.
+    Two calls are made: (a, b) then (b, a) -- each retried once if the first
+    attempt is unparseable (see `_call_grok_with_retry`). When the two
+    orderings disagree about the winner, consistent=False and the verdict is
+    "tie" -- an order-dependent preference is not evidence, and this function
+    never resolves that disagreement toward either side. A judge call that
+    returns unparseable output on every attempt degrades the whole pair to a
+    tie the same way (per the brief: "a fake grok returning garbage degrades
+    to a tie rather than raising"). `grade_matrix` additionally uses the
+    unparseable/tie distinction internally to exclude non-runs from the
+    graded sample -- see `_judge_pair_impl` -- but that distinction is not
+    part of this function's public contract, which always returns a
+    `make_judge_verdict`.
     """
-    verdict, _unparseable = _judge_pair_impl(prompt, response_a, response_b,
-                                              grok=grok, model=model)
+    verdict, _unparseable, _detail = _judge_pair_impl(prompt, response_a, response_b,
+                                                       grok=grok, model=model)
     return verdict
 
 
@@ -577,20 +678,31 @@ def grade_matrix(matrix, *, prompt, grok=None, model=None):
 
         judge = None
         if control_ok and treatment_ok:
-            verdict, unparseable = _judge_pair_impl(
+            verdict, unparseable, failure_detail = _judge_pair_impl(
                 prompt,
                 control_run.get("response_text", ""),
                 treatment_run.get("response_text", ""),
                 grok=grok, model=model,
             )
-            # An unparseable pair is not a judged tie -- it's the absence of
-            # a judgment. Recording it as a fabricated tie is exactly how
-            # C1 shipped invisibly: every call failing read as "zero losses"
-            # to the gate. Leaving `judge` as None here instead means the
-            # pair is excluded from win_rate/judge_consistency's sample
-            # size, so a broken judge shows up as too few judged pairs
-            # rather than a clean quality pass.
-            judge = None if unparseable else verdict
+            if unparseable:
+                # An unparseable pair is not a judged tie -- it's the absence
+                # of a judgment. Recording it as a fabricated tie is exactly
+                # how C1 shipped invisibly: every call failing read as "zero
+                # losses" to the gate. Leaving `judge` as None here instead
+                # means the pair is excluded from win_rate/judge_consistency's
+                # sample size, so a broken judge shows up as too few judged
+                # pairs rather than a clean quality pass. But an unexplained
+                # absence is only half the fix (fix-round-3): the *why* must
+                # still reach the report, so it's recorded as a low-severity
+                # regression rather than silently dropped alongside `judge`.
+                judge = None
+                regs.append(make_regression(
+                    kind="judge_unavailable", severity="low",
+                    detail=f"Judge produced no usable verdict for this pair: {failure_detail}",
+                    evidence=json.dumps(verdict["raw"], default=str)[:2000],
+                ))
+            else:
+                judge = verdict
 
         grades.append(make_grade(
             repeat=control_run.get("repeat", i),

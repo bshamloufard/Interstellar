@@ -550,20 +550,47 @@ def _check_budget(estimate, budget_usd):
 # --------------------------------------------------------------------------
 
 def _verdict_line(patch, gate_result):
+    """Render the gate's three-state truth, by name, matching report.py's
+    own vocabulary (`_gate_badge`) exactly -- this used to independently
+    guess at wording and got it wrong: a k=3 patch that measured a real
+    47% token reduction with a judged tie and zero regressions printed as
+    "REJECTED (trends favorable)", which reads as "we tested this and it
+    lost" for a patch that, in fact, simply could not be accepted OR
+    rejected at this sample size. `directional` always says which way the
+    evidence leans regardless of whether a call could be made; `accepted`/
+    `provisional`/`reasons` say whether one could.
+
+    REJECTED is reserved for a patch that stats.gate() actually had enough
+    evidence to reject -- a real judge-loss majority, a metric that
+    credibly got worse, or a high-severity regression -- detected the same
+    way report.py's badge does: `"insufficient_samples_for_acceptance"` in
+    `reasons` means n < stats.MIN_SAMPLES_FOR_ACCEPT (5), the zone where NO
+    accept/reject call is possible by construction (every k=3/k=5 cycle
+    lands here), so that must render as a directional reading instead.
+
+    `directional == "unknown"` (zero usable pairs -- every run failed on
+    at least one arm, or the patch was never applied) is checked first and
+    always renders as DIRECTIONAL: UNKNOWN: "nothing could be measured" is
+    a different claim from "measured and came out even" (a real "neutral"
+    reading) and must never collapse into either NEUTRAL or a false
+    REJECTED."""
     kind, target = patch["kind"], patch["target"]
     reasons = gate_result.get("reasons") or []
     headline = reasons[0] if reasons else "no reasons recorded"
-    if gate_result.get("accepted"):
+    directional = (gate_result.get("directional") or "unknown").upper()
+
+    if gate_result.get("directional") == "unknown":
+        status = "DIRECTIONAL: UNKNOWN"
+    elif gate_result.get("accepted"):
         status = "ACCEPTED"
     elif gate_result.get("provisional"):
         status = "PROVISIONAL"
     else:
-        status = "REJECTED"
-    direction = {
-        "favorable": "trends favorable", "unfavorable": "trends unfavorable",
-        "neutral": "trends neutral",
-    }.get(gate_result.get("directional"), "direction not determined")
-    return f"{status} ({direction}): {kind} on {target!r} -- {headline}"
+        too_few_for_any_call = any(
+            "insufficient_samples_for_acceptance" in r for r in reasons)
+        status = f"DIRECTIONAL: {directional}" if too_few_for_any_call else "REJECTED"
+
+    return f"{status}: {kind} on {target!r} -- {headline}"
 
 
 def _baseline_summary(baseline_version):
@@ -725,10 +752,38 @@ def _print_patch_result(patch, gate_result, verdict, health):
           f"treatment {treatment_ok}/{treatment_k} ok")
 
 
+def _all_directional_for_sample_size(patch_results):
+    """True iff every patch's gate decision was blocked purely by sample
+    size -- stats.gate()'s own "insufficient_samples_for_acceptance"
+    reason (n < stats.MIN_SAMPLES_FOR_ACCEPT), the same signal
+    `_verdict_line` uses to render DIRECTIONAL instead of a false
+    REJECTED -- and not by an actual loss, a high-severity regression, a
+    no-data cycle, or a patch that was never applied. An empty
+    `patch_results` is not this case (there is nothing to re-run bigger)."""
+    if not patch_results:
+        return False
+    for pr in patch_results:
+        gate_result = pr.get("gate") or {}
+        if gate_result.get("accepted") or gate_result.get("provisional"):
+            return False
+        reasons = gate_result.get("reasons") or []
+        if not any("insufficient_samples_for_acceptance" in r for r in reasons):
+            return False
+    return True
+
+
 def _print_cycle_summary(rpt, out_dir, total_cost):
     print(f"=== cycle done: {len(rpt['patch_results'])} patch(es) tested "
           f"(spent ${total_cost:.4f}) ===")
     print(f"report: {Path(out_dir) / 'index.html'}")
+    if _all_directional_for_sample_size(rpt.get("patch_results") or []):
+        print(
+            f"note: every patch's result is directional-only -- k={rpt.get('k')} "
+            f"is below the {stats.MIN_SAMPLES_FOR_CI} paired repeats the "
+            f"acceptance gate requires for a real accept/reject call. "
+            f"Re-run with --k {stats.MIN_SAMPLES_FOR_CI} to reach the "
+            "sample size the gate requires."
+        )
 
 
 def _preflight_prompt():
@@ -1047,8 +1102,11 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
         else:
             grades = []
             summary = {}
+            # directional="unknown", not "neutral": a patch that was never
+            # applied measured nothing, which is a different claim from
+            # "measured and came out even" -- see _verdict_line.
             gate_result = {
-                "accepted": False, "provisional": False, "directional": "neutral",
+                "accepted": False, "provisional": False, "directional": "unknown",
                 "reasons": [f"patch not applied: {application['reason']}"],
             }
             matrix_summary = make_replay_matrix(
