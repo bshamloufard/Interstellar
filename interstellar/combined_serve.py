@@ -24,7 +24,12 @@ a broken destination -- and navigating to that route directly renders an
 explanatory page (200), never a 500.
 
 Entry point:
-    python3 -m interstellar.combined_serve <out_dir> [--trace-package DIR] [--port 4242]
+    python3 -m interstellar.combined_serve <out_dir> [--trace-package DIR] \
+        [--trace-file TRACE.JSON] [--port 4242]
+
+`--trace-file` (optional) lets the Review tab's run panel start the VERY
+FIRST review cycle for `out_dir` when it has no report yet, not only
+re-run an existing one -- see make_server()'s docstring.
 
 `interstellar/cli.py` does not call this module (out of this module's
 ownership) -- run it directly, or see report.serve()/sa.serve.serve() for
@@ -228,13 +233,48 @@ _TAB_EXTRA_CSS = """
 .tab-empty { max-width: 640px; margin: 3rem auto; padding: 0 1rem; text-align: center; }
 .tab-empty h1 { font-size: 18px; }
 .tab-empty p { color: var(--muted); }
+
+/* First-run trigger: report.py's run_panel_html() markup, rendered on an
+ * empty Review tab so the very first cycle for out_dir can be started from
+ * the page, not only re-runs of an existing report -- same CSS rules as
+ * report.py's own _STYLE (duplicated here, not imported: this shell page
+ * has no report.json to have generated a stylesheet from yet). */
+.run-panel { display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  justify-content: center; margin-top: 0.75rem; }
+.run-panel-disabled { color: var(--muted); font-size: 12px; margin-top: 0.75rem; }
+.run-current { font-size: 11px; font-family: var(--mono); color: var(--muted); }
+.run-k-label { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 0.3rem; }
+.run-k-label select { font-family: var(--mono); font-size: 11.5px; background: var(--bg);
+  color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.15rem 0.3rem; }
+#run-btn { font-family: var(--font); font-size: 12px; font-weight: 600; color: var(--accent);
+  background: var(--accent-dim); border: 1px solid var(--accent); border-radius: 999px;
+  padding: 0.3rem 0.8rem; cursor: pointer; }
+#run-btn:hover:not(:disabled) { filter: brightness(1.08); }
+#run-btn:disabled { cursor: not-allowed; opacity: 0.55; }
+.run-status { font-size: 11px; font-family: var(--mono); color: var(--muted); max-width: 36ch; }
+.run-status.running { color: #38bdf8; }
+.run-status.done { color: #34d399; }
+.run-status.failed { color: var(--bad); font-weight: 600; }
 """
 
 
-def _unavailable_page_html(sides, side):
+def _unavailable_page_html(sides, side, run_manager=None):
+    """Rendered for the missing tab, 200 not 404/500 (see module docstring).
+    For side="review" specifically, when `run_manager` already has a
+    trace_file to work with (see _RunManager.configure_first_run, wired up
+    in make_server() below), this also renders report.py's run_panel_html
+    -- the FIRST review cycle for out_dir can then be started from the
+    page itself, not only re-runs of a report that already exists."""
     label = "Trace" if side == "trace" else "Review"
     reason = sides.unavailable_reason(side)
     shell = _tab_shell_html(sides, side)
+    run_panel_html = ""
+    script = ""
+    if side == "review" and run_manager is not None:
+        rerun = run_manager.rerun_config()
+        if rerun.get("trace_file"):
+            run_panel_html = report_mod.run_panel_html(rerun, current_k=0, first_run=True)
+            script = f"<script>{report_mod._SCRIPT}</script>"
     return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -245,7 +285,9 @@ def _unavailable_page_html(sides, side):
 <main class="tab-empty">
   <h1>{html.escape(label)} unavailable</h1>
   <p>{html.escape(reason)}</p>
+  {run_panel_html}
 </main>
+{script}
 </body>
 </html>"""
 
@@ -344,10 +386,14 @@ class _CombinedHandler(http.server.BaseHTTPRequestHandler):
 
     def _serve_review(self):
         if not self._sides.review_available():
-            return self._send_html(200, _unavailable_page_html(self._sides, "review"))
+            return self._send_html(
+                200, _unavailable_page_html(self._sides, "review", run_manager=self._run_manager),
+            )
         report_dict = self._sides.review_report()
         if report_dict is None:
-            return self._send_html(200, _unavailable_page_html(self._sides, "review"))
+            return self._send_html(
+                200, _unavailable_page_html(self._sides, "review", run_manager=self._run_manager),
+            )
         page = report_mod.render_html(report_dict)
         return self._send_html(200, _inject_tab_shell(page, self._sides, "review"))
 
@@ -399,19 +445,36 @@ class _LoopbackTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 
 
-def make_server(out_dir, trace_package_dir, *, host="127.0.0.1", port=DEFAULT_PORT, argv_builder=None):
+def make_server(out_dir, trace_package_dir, *, host="127.0.0.1", port=DEFAULT_PORT, argv_builder=None,
+                 first_run_trace_file=None, first_run_args=None):
     """Build (but do not start) the combined loopback server. Split out
     from serve() so tests can bind an ephemeral port (port=0). Either
-    out_dir or trace_package_dir may be None/missing -- see _Sides."""
+    out_dir or trace_package_dir may be None/missing -- see _Sides.
+
+    `first_run_trace_file` (optional): a normalized trace.json (the format
+    `interstellar review` itself consumes -- NOT trace_package_dir's
+    session_analysis package format) to fall back to when out_dir has no
+    report.json yet, so the Review tab's run panel can start the very
+    first cycle for out_dir, not only re-run one that already exists --
+    see _RunManager.configure_first_run. Ignored once out_dir already has
+    a report (that report's own "rerun" key wins, as normal)."""
     sides = _Sides(out_dir, trace_package_dir)
-    run_manager = report_mod.make_run_manager(sides.out_dir, argv_builder=argv_builder) if sides.out_dir else None
+    run_manager = None
+    if sides.out_dir:
+        run_manager = report_mod.make_run_manager(sides.out_dir, argv_builder=argv_builder)
+        if not sides.review_available() and first_run_trace_file:
+            run_manager.configure_first_run(first_run_trace_file, args=first_run_args)
     handler = functools.partial(_CombinedHandler, sides=sides, run_manager=run_manager)
     return _LoopbackTCPServer((host, port), handler)
 
 
-def serve(out_dir, trace_package_dir, *, host="127.0.0.1", port=DEFAULT_PORT, open_browser=True, argv_builder=None):
+def serve(out_dir, trace_package_dir, *, host="127.0.0.1", port=DEFAULT_PORT, open_browser=True,
+          argv_builder=None, first_run_trace_file=None, first_run_args=None):
     """Serve both tabs on one loopback server, bound to 127.0.0.1 only."""
-    with make_server(out_dir, trace_package_dir, host=host, port=port, argv_builder=argv_builder) as httpd:
+    with make_server(
+        out_dir, trace_package_dir, host=host, port=port, argv_builder=argv_builder,
+        first_run_trace_file=first_run_trace_file, first_run_args=first_run_args,
+    ) as httpd:
         bound_host, bound_port = httpd.server_address
         url = f"http://{bound_host}:{bound_port}/"
         print(f"serving combined dashboard at {url}")
@@ -442,6 +505,11 @@ def main(argv=None):
                     help="Alex's normalized session_analysis package dir "
                          "(manifest.json + data/*.json, from `python -m sa normalize`); "
                          "omit to serve only the review report")
+    p.add_argument("--trace-file", type=Path, default=None,
+                    help="normalized trace.json (interstellar review's own input "
+                         "format -- from normalizer/grok_normalize.py, distinct from "
+                         "--trace-package) for the FIRST review cycle: lets the Review "
+                         "tab's button start a cycle when out_dir has no report yet")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--no-open", action="store_true", help="do not open a browser")
@@ -450,7 +518,7 @@ def main(argv=None):
         raise SystemExit("error: need at least one of <out_dir> or --trace-package")
     serve(
         args.out_dir, args.trace_package, host=args.host, port=args.port,
-        open_browser=not args.no_open,
+        open_browser=not args.no_open, first_run_trace_file=args.trace_file,
     )
     return 0
 

@@ -10,6 +10,11 @@ _interstellar_root() {
 
 INTERSTELLAR_SA_ROOT="${INTERSTELLAR_SA_ROOT:-$(_interstellar_root)}"
 INTERSTELLAR_PACKAGES_DIR="${INTERSTELLAR_PACKAGES_DIR:-$INTERSTELLAR_SA_ROOT/packages}"
+# Parent Interstellar repo (two levels up from hackathon/session-analysis) --
+# where interstellar/combined_serve.py and interstellar/report.py live, and
+# where `interstellar review --out runs/<sid>` writes by convention (see
+# _interstellar_default_review_out below).
+INTERSTELLAR_REPO_ROOT="${INTERSTELLAR_REPO_ROOT:-$(cd "$INTERSTELLAR_SA_ROOT/../.." && pwd)}"
 GROK_HOME="${GROK_HOME:-$HOME/.grok-hackathon}"
 
 _interstellar_python() {
@@ -204,6 +209,18 @@ _interstellar_default_package_out() {
 
 _interstellar_is_package() {
   [[ -d "${1:-}" && -f "${1}/manifest.json" ]]
+}
+
+# Conventional review-report out_dir for a session id: runs/<sid> at the
+# Interstellar repo root -- parallel to packages/<sid> for the normalized
+# trace. Nothing has to exist there yet (combined_serve degrades cleanly
+# when it doesn't); this only picks WHERE the review tab would look, so
+# `interstellar review ... --out "$(interstellar-review-out SID)"` and
+# `interstellar <session-id>` agree on the same directory without either
+# side hardcoding the other's path.
+_interstellar_default_review_out() {
+  local sid="$1"
+  printf '%s\n' "$INTERSTELLAR_REPO_ROOT/runs/$sid"
 }
 
 # Normalize session_dir → package_dir (prints package path on stdout last line via echo to stderr for logs)

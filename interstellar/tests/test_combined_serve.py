@@ -162,9 +162,11 @@ class RouteTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.tmp_path = Path(self.tmp.name)
 
-    def _serve(self, out_dir, trace_package_dir, argv_builder=None):
+    def _serve(self, out_dir, trace_package_dir, argv_builder=None,
+               first_run_trace_file=None, first_run_args=None):
         httpd = combined_serve.make_server(
             out_dir, trace_package_dir, host="127.0.0.1", port=0, argv_builder=argv_builder,
+            first_run_trace_file=first_run_trace_file, first_run_args=first_run_args,
         )
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()

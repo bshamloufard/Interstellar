@@ -26,10 +26,15 @@ USAGE
                else \$GROK_SESSION_ID
 
 OPTIONS
-  -o, --out DIR       Package output (default: packages/<session-id>)
-  --port N            Visualizer port (default 8765)
-  --no-open           Do not open a browser
-  --normalize-only    Only write the package
+  -o, --out DIR         Package output (default: packages/<session-id>)
+  --review-out DIR      Review report dir for the Review tab (default:
+                        runs/<session-id> at the Interstellar repo root --
+                        the same default \`interstellar review\` uses when
+                        --out matches; unavailable/empty until a review
+                        cycle has actually been run there)
+  --port N              Combined dashboard port (default 8765)
+  --no-open             Do not open a browser
+  --normalize-only      Only write the package
 
 EXAMPLES
   interstellar
@@ -58,6 +63,7 @@ fi
 
 SESSION_ARG=""
 OUT_ARG=""
+REVIEW_OUT_ARG=""
 PORT=8765
 NO_OPEN=0
 NORMALIZE_ONLY=0
@@ -66,6 +72,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--out)
       OUT_ARG="${2:-}"
+      shift 2
+      ;;
+    --review-out)
+      REVIEW_OUT_ARG="${2:-}"
       shift 2
       ;;
     --port)
@@ -95,6 +105,7 @@ done
 SESSION="$(_interstellar_resolve_session "${SESSION_ARG:-}")" || exit 1
 SID="$(_interstellar_session_id "$SESSION")"
 OUT="${OUT_ARG:-$(_interstellar_default_package_out "$SESSION")}"
+REVIEW_OUT="${REVIEW_OUT_ARG:-$(_interstellar_default_review_out "$SID")}"
 
 echo "════════════════════════════════════════════════════"
 echo " interstellar — normalize + visualize"
@@ -102,6 +113,7 @@ echo "════════════════════════�
 echo " session-id  $SID"
 echo " session     $SESSION"
 echo " package     $OUT"
+echo " review-out  $REVIEW_OUT  $([[ -f "$REVIEW_OUT/index.html" ]] && echo '(review found)' || echo '(no review yet -- Review tab will say so)')"
 echo "════════════════════════════════════════════════════"
 echo ""
 
@@ -118,13 +130,13 @@ if [[ "$NORMALIZE_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
-echo "starting visualizer → http://127.0.0.1:${PORT}/"
+echo "starting combined dashboard (Trace + Review tabs) → http://127.0.0.1:${PORT}/"
 echo "(Ctrl+C to stop)"
 echo ""
 
-ARGS=(serve "$OUT" --port "$PORT")
+ARGS=("$REVIEW_OUT" --trace-package "$OUT" --port "$PORT")
 if [[ "$NO_OPEN" -eq 1 ]]; then
   ARGS+=(--no-open)
 fi
-exec env PYTHONPATH="$INTERSTELLAR_SA_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
-  "$(_interstellar_python)" -m sa "${ARGS[@]}"
+exec env PYTHONPATH="$INTERSTELLAR_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  "$(_interstellar_python)" -m interstellar.combined_serve "${ARGS[@]}"

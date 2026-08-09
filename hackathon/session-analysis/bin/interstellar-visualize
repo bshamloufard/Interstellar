@@ -14,13 +14,16 @@ source "$HERE/interstellar-lib.sh"
 
 usage() {
   cat <<EOF
-usage: interstellar-visualize [session-id|package_dir] [--port N] [--no-open]
+usage: interstellar-visualize [session-id|package_dir] [--port N] [--review-out DIR] [--no-open]
 
-  Opens the session_analysis visualizer. If you pass a session-id (or nothing),
-  the session is normalized first, then served.
+  Opens the combined Trace+Review dashboard. If you pass a session-id (or
+  nothing), the session is normalized first, then served.
 
   session-id    Session UUID (default: current workspace / newest)
   package_dir   Existing package (manifest.json) — serve only, no re-normalize
+  --review-out DIR  Review report dir for the Review tab
+                    (default: runs/<session-id> at the repo root; the
+                    Review tab says so plainly if nothing is there yet)
   --port N      Port (default 8765)
   --no-open     Do not open a browser
 EOF
@@ -28,12 +31,17 @@ EOF
 
 ARG=""
 PORT=8765
+REVIEW_OUT_ARG=""
 NO_OPEN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --port)
       PORT="${2:-8765}"
+      shift 2
+      ;;
+    --review-out)
+      REVIEW_OUT_ARG="${2:-}"
       shift 2
       ;;
     --no-open) NO_OPEN=1; shift ;;
@@ -73,13 +81,15 @@ else
   echo "✓ package:  $PKG"
 fi
 
+REVIEW_OUT="${REVIEW_OUT_ARG:-$(_interstellar_default_review_out "$SID")}"
+echo "review-out: $REVIEW_OUT  $([[ -f "$REVIEW_OUT/index.html" ]] && echo '(review found)' || echo '(no review yet -- Review tab will say so)')"
 echo "url:        http://127.0.0.1:${PORT}/"
 echo "(Ctrl+C to stop)"
 echo ""
 
-ARGS=(serve "$PKG" --port "$PORT")
+ARGS=("$REVIEW_OUT" --trace-package "$PKG" --port "$PORT")
 if [[ "$NO_OPEN" -eq 1 ]]; then
   ARGS+=(--no-open)
 fi
-exec env PYTHONPATH="$INTERSTELLAR_SA_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
-  "$(_interstellar_python)" -m sa "${ARGS[@]}"
+exec env PYTHONPATH="$INTERSTELLAR_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  "$(_interstellar_python)" -m interstellar.combined_serve "${ARGS[@]}"

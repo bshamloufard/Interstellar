@@ -954,18 +954,21 @@ def _matrix_summary_line(matrix):
     return " · ".join(parts)
 
 
-def _run_panel_html(rerun, *, current_k):
-    """Task 2: the button that re-runs this report's review cycle. `rerun`
-    is the report["rerun"] dict build() stamped on (trace_file, k_choices,
-    args) -- see build()'s docstring. With no trace_file recorded (an
-    older report, or one built without going through cli.py's real
-    session), there is nothing for the server to re-run: render an
-    explanation, not a dead button."""
+def run_panel_html(rerun, *, current_k, first_run=False):
+    """Task 2: the button that runs (or re-runs) a review cycle for this
+    trace. `rerun` is the report["rerun"] dict build() stamped on
+    (trace_file, k_choices, args) -- see build()'s docstring -- OR, for
+    `first_run=True` (interstellar/combined_serve.py's Review tab when no
+    report exists yet at all), an equivalent dict assembled from whatever
+    trace_file the combined server was launched with (see _RunManager.
+    configure_first_run). With no trace_file at all, there is nothing for
+    the server to run: render an explanation, not a dead button."""
     trace_file = rerun.get("trace_file") or ""
     if not trace_file:
+        verb = "Run" if first_run else "Re-run"
         return (
             '<div class="run-panel run-panel-disabled">'
-            '<span class="muted">Re-run unavailable: no trace file recorded '
+            f'<span class="muted">{verb} unavailable: no trace file recorded '
             "for this report.</span></div>"
         )
     choices = rerun.get("k_choices") or list(ALLOWED_RERUN_K)
@@ -976,12 +979,13 @@ def _run_panel_html(rerun, *, current_k):
     )
     current_note = (
         f'<span class="run-current muted">current report: k={_esc(current_k)}</span>'
-        if current_k else ""
+        if current_k and not first_run else ""
     )
+    btn_label = "Run review cycle" if first_run else "Re-run review cycle"
     return f"""<div class="run-panel" id="run-panel" data-trace="{_esc(trace_file)}">
       {current_note}
       <label class="run-k-label">k <select id="run-k">{options}</select></label>
-      <button id="run-btn" type="button">Re-run review cycle</button>
+      <button id="run-btn" type="button">{btn_label}</button>
       <span id="run-status" class="run-status idle">idle</span>
     </div>"""
 
@@ -1307,7 +1311,7 @@ def render_html(report) -> str:
         <span class="pill">cycle cost <strong>${cost:,.4f}</strong></span>
         <span class="pill">generated <strong>{_esc(generated_at or "—")}</strong></span>
         {_view_switcher_html(report.get("trace_viz") or {}, session.get("session_id") or "")}
-        {_run_panel_html(report.get("rerun") or {}, current_k=k)}
+        {run_panel_html(report.get("rerun") or {}, current_k=k)}
       </div>
     </header>
     """
@@ -2144,6 +2148,32 @@ class _RunManager:
                 "error": self._error,
                 "trace_file": self._rerun.get("trace_file") or "",
             }
+
+    def configure_first_run(self, trace_file, args=None):
+        """Used when out_dir has no report.json yet -- the very first cycle
+        for this directory, which make_run_manager() has nothing to load a
+        "rerun" config from. Stamps a trace_file/args directly so /run can
+        still work; a real cycle finishing afterward writes report.json
+        with its own "rerun" key, and the NEXT make_run_manager() call (a
+        fresh server start, or interstellar/combined_serve.py's per-
+        request _Sides re-check) picks that up normally instead. Never
+        overwrites a trace_file this manager was already given -- only
+        fills in a genuinely empty one."""
+        with self._lock:
+            if not self._rerun.get("trace_file"):
+                self._rerun = {
+                    "trace_file": str(trace_file),
+                    "k_choices": list(ALLOWED_RERUN_K),
+                    "args": dict(args) if args else {},
+                }
+
+    def rerun_config(self):
+        """A copy of the rerun config (trace_file/k_choices/args) currently
+        backing this manager -- for rendering (see run_panel_html) when no
+        report.json exists yet to read it from directly. start() reads
+        self._rerun itself; this is for display only."""
+        with self._lock:
+            return dict(self._rerun)
 
     def start(self, k):
         """Validate `k` (the only request-supplied value -- see the module
