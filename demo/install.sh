@@ -20,8 +20,9 @@ cp "$HERE/repo_fixture/"*.py "$HERE/repo_fixture/README.md" "$REPO_DIR/"
 
 echo "== materializing demo GROK_HOME at $DEMO_HOME =="
 mkdir -p "$DEMO_HOME/skills" "$DEMO_HOME/sessions"
-rm -rf "$DEMO_HOME/skills/checkout-debugging"
+rm -rf "$DEMO_HOME/skills/checkout-debugging" "$DEMO_HOME/skills/interstellar"
 cp -r "$HERE/harness_fixture/skills/checkout-debugging" "$DEMO_HOME/skills/"
+cp -r "$HERE/harness_fixture/skills/interstellar" "$DEMO_HOME/skills/"
 cp "$HERE/harness_fixture/config.toml" "$DEMO_HOME/config.toml"
 
 if [ ! -f "$HOME/.grok/auth.json" ]; then
