@@ -496,6 +496,51 @@ class CacheSensitiveMetricsTests(unittest.TestCase):
             self.assertFalse(cli.CACHE_SENSITIVE_METRICS[name])
 
 
+class StampCacheSensitivityTests(unittest.TestCase):
+    """report.py's table renderer reads `cache_sensitive` PER METRIC ENTRY
+    inside statistics["efficiency"], not from the report-level
+    cache_sensitive_metrics dict cli.py also sets -- the two were built on
+    each side without the per-entry stamp ever actually happening, so the
+    marker never rendered. _stamp_cache_sensitivity is the fix; these
+    tests check what it actually produces, the shape the renderer reads."""
+
+    def _summary(self, efficiency):
+        return {"win_rate": {}, "regressions": [], "efficiency": efficiency,
+                "primary_metric": "cost_usd"}
+
+    def test_stamps_true_and_false_correctly(self):
+        summary = self._summary({
+            "cost_usd": {"control_median": 1.0, "treatment_median": 0.9},
+            "skill_tokens_est": {"control_median": 100, "treatment_median": 50},
+        })
+        stamped = cli._stamp_cache_sensitivity(summary)
+        self.assertTrue(stamped["efficiency"]["cost_usd"]["cache_sensitive"])
+        self.assertFalse(stamped["efficiency"]["skill_tokens_est"]["cache_sensitive"])
+
+    def test_preserves_other_fields_on_each_entry(self):
+        summary = self._summary({
+            "cost_usd": {"control_median": 1.0, "treatment_median": 0.9, "bootstrap": {"n": 5}},
+        })
+        stamped = cli._stamp_cache_sensitivity(summary)
+        entry = stamped["efficiency"]["cost_usd"]
+        self.assertEqual(entry["control_median"], 1.0)
+        self.assertEqual(entry["bootstrap"], {"n": 5})
+
+    def test_does_not_mutate_the_input(self):
+        original_entry = {"control_median": 1.0}
+        summary = self._summary({"cost_usd": original_entry})
+        cli._stamp_cache_sensitivity(summary)
+        self.assertNotIn("cache_sensitive", original_entry)
+
+    def test_empty_efficiency_is_a_noop(self):
+        summary = {"win_rate": {}, "regressions": [], "efficiency": {}}
+        self.assertEqual(cli._stamp_cache_sensitivity(summary), summary)
+
+    def test_missing_efficiency_key_is_a_noop(self):
+        cli._stamp_cache_sensitivity({})  # must not raise
+        cli._stamp_cache_sensitivity(None)  # must not raise
+
+
 def _patch_for_verdict(kind="skill.truncate", target="strict-audit"):
     return {"kind": kind, "target": target}
 

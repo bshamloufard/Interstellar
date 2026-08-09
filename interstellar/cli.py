@@ -751,6 +751,37 @@ CACHE_SENSITIVE_METRICS = {
 }
 
 
+def _stamp_cache_sensitivity(summary):
+    """Copy `summary` (stats.summarize()'s output), stamping `cache_sensitive`
+    onto each per-metric entry in `summary["efficiency"]` from
+    `CACHE_SENSITIVE_METRICS`.
+
+    report.py's table renderer (`_metric_row`/`_efficiency_table`) reads
+    `cache_sensitive` PER METRIC ENTRY, inside `statistics["efficiency"]` --
+    not from a report-level dict. The top-level `report["cache_sensitive_metrics"]`
+    this module also sets is the authoritative constant (cheap to keep, and
+    useful to anything reading the raw JSON), but the renderer never looks
+    at it; without this stamp the per-row `cache†` marker never
+    appears, which is exactly the gap that leaves an unmarked, noisy cost
+    figure sitting next to a solid deterministic measurement -- the one
+    thing the cache-warmth disclosure exists to prevent.
+
+    Copies rather than mutates `summary` in place: it may be a
+    caller-owned or test-injected dict (a fake `stats_summarize` return
+    value reused across assertions, for instance), not something this
+    function should have a side effect on."""
+    summary = dict(summary or {})
+    efficiency = summary.get("efficiency")
+    if efficiency:
+        stamped = {}
+        for name, entry in efficiency.items():
+            entry = dict(entry or {})
+            entry["cache_sensitive"] = CACHE_SENSITIVE_METRICS.get(name, False)
+            stamped[name] = entry
+        summary["efficiency"] = stamped
+    return summary
+
+
 def _cache_read_range(patch_results):
     """(min, max) of `usage.cache_read_input_tokens` observed across every
     run in every patch's matrix this cycle -- real numbers, never a canned
@@ -1301,6 +1332,12 @@ def run_review(trace_path, *, out_dir, k=DEFAULT_K, max_patches=DEFAULT_MAX_PATC
             summary = summarize_fn(grades, primary_effect=effect, seed=seed)
             gate_result = gate_fn(summary, primary_effect=effect,
                                   max_token_regression=max_token_regression)
+            # Stamped AFTER gate_fn, not before: stats.gate() gets exactly
+            # the summary stats.summarize() produced, with no extra key
+            # this module doesn't own the meaning of. Only the copy that
+            # ends up on the report (make_patch_result's `statistics`
+            # field, below) carries `cache_sensitive` per metric.
+            summary = _stamp_cache_sensitivity(summary)
 
             _write_json(out_dir / "patches" / patch["patch_id"] / "matrix.json", matrix)
             matrix_summary = _strip_traces(matrix)
