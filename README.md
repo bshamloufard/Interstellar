@@ -73,6 +73,56 @@ python3 -m interstellar review path/to/trace.json \
   --k 3 --max-patches 3 --out runs/my-run/ --serve
 ```
 
+### Dashboard
+
+Both views of a session live on **one loopback site, as two tabs**:
+
+| Tab | What it shows |
+|---|---|
+| **Trace** | the session timeline — every tool, skill, MCP call and its duration, plus the rules-based insights strip |
+| **Review** | what to change and whether it helped — patch diffs, before/after metrics, the acceptance verdict |
+
+```sh
+python3 -m interstellar.combined_serve runs/my-run/ \
+  --trace-package hackathon/session-analysis/packages/<session-id>/ \
+  --port 4242
+```
+
+Or from the visualizer launcher, which normalizes the session first:
+
+```sh
+hackathon/session-analysis/bin/interstellar-visualize <session-id> [--review-out DIR]
+```
+
+Either side may be omitted — pass only `--trace-package` to serve the timeline
+alone, or only `out_dir` for the report alone. The missing tab says so plainly
+rather than erroring. The header shows the session id both tabs are rendering,
+and warns loudly if they disagree.
+
+**Running the analysis from the page.** The Review tab has a **Re-run** button
+with a `k` selector (3 / 5 / 10). It starts a full cycle — analyze, patch,
+replay, grade — and reloads with the new recommendations when it finishes. A
+cycle takes minutes and spends real API budget, so the button reports elapsed
+time while it runs and surfaces the error if it fails.
+
+`k` matters: the acceptance gate cannot accept anything below `k=5`, because at
+k=3 no statistic can reach significance by construction (see
+[docs/review-loop/methodology.md](docs/review-loop/methodology.md)). Use `k=10`
+when you want a verdict rather than a direction.
+
+Starting from a session with no report yet? Point the button at its normalized
+trace and the first cycle can be launched from the page:
+
+```sh
+python3 -m interstellar.combined_serve runs/new-run/ \
+  --trace-package hackathon/session-analysis/packages/<session-id>/ \
+  --trace-file traces/corpus/<session>.json
+```
+
+The server binds `127.0.0.1` only, serves a fixed allow-list of files, and the
+re-run endpoint accepts nothing from the request except a whitelisted `k` —
+every other argument comes from server-side config.
+
 ---
 
 <div align="center">
@@ -173,6 +223,13 @@ MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
 
 | Path | Contents |
 |------|----------|
+| `interstellar/` | The review loop: harness snapshot, typed patches, sandboxed replay, graders, paired statistics, report + dashboard |
+| `normalizer/` | Grok session store → the canonical `trace.json` every stage reads |
+| `analyzer/` | The session auditor: deterministic digest → schema-constrained recommendations |
+| `synth/` | Labelled synthetic corpus — real sessions with planted, documented defects, plus the coverage gate |
+| `traces/corpus/` | The generated corpus and its answer key |
+| `hackathon/session-analysis/` | The trace visualizer (timeline + insights) and its normalizer |
+| `docs/review-loop/` | Statistical methodology and the branch review behind the loop's design |
 | `crates/codegen/xai-grok-pager-bin` | Composition-root package; builds the `xai-grok-pager` binary |
 | `crates/codegen/xai-grok-pager` | The TUI: scrollback, prompt, modals, rendering |
 | `crates/codegen/xai-grok-shell` | Agent runtime + leader/stdio/headless entry points |
