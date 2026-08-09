@@ -1,3 +1,78 @@
+# Interstellar
+
+**Ever finished a coding session and wondered what went wrong?**
+
+We built **Interstellar** to help you understand why.
+
+Run `/interstellar` to automatically analyze your session, recommend better tools and skills, propose harness updates, and validate the changes.
+
+**One command to make your next session better.**
+
+---
+
+## Setup
+
+```sh
+git pull origin main
+```
+
+Open a fresh Grok session with this repo as the workspace so project skills (including `/interstellar`) reload.
+
+---
+
+## How it works
+
+[Architecture (Excalidraw)](https://app.excalidraw.com/l/112hwLhjPUg/4UZ9EDqF6a2)
+
+```text
+  finished session
+        │
+        ▼
+  normalize  ──►  canonical trace + timeline
+        │
+        ▼
+  analyze    ──►  findings & recommendations
+        │           (skills, tools, MCP, harness shape)
+        ▼
+  patch      ──►  bounded harness changes
+        │           (skills, config, MCP, rules)
+        ▼
+  replay     ──►  same prompt, control vs treatment
+        │
+        ▼
+  grade      ──►  efficiency meters + pairwise judge
+        │
+        ▼
+  report     ──►  did the change actually help?
+```
+
+---
+
+## Quick start
+
+### In Grok
+
+```text
+/interstellar                 # current / latest session
+/interstellar <session-id>    # specific session UUID
+```
+
+### Full review loop (CLI)
+
+From the repo root (Python 3.12+, stdlib only — no pip install):
+
+```sh
+# Plan only — no model spend
+python3 -m interstellar review traces/corpus/skill_bloat_*.json \
+  --dry-run --use-cached-analysis
+
+# Live cycle: analyze → patch → replay → grade → report
+python3 -m interstellar review path/to/trace.json \
+  --k 3 --max-patches 3 --out runs/my-run/ --serve
+```
+
+---
+
 <div align="center">
 
 <h1>
